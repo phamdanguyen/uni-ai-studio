@@ -138,9 +138,18 @@ Score >= 0.7 means pass.`, mediaType),
 
 // generateBatch processes multiple panels for image/video generation.
 func (a *Agent) generateBatch(ctx context.Context, msg agent.Message) (*agent.TaskResult, error) {
-	panels, ok := msg.Payload["panels"].([]any)
-	if !ok {
-		return &agent.TaskResult{Status: agent.TaskStatusFailed, Error: "panels must be array"}, nil
+	// Panels can come directly as "panels" key, or nested inside "storyboard" map
+	var panels []any
+	if p, ok := msg.Payload["panels"].([]any); ok {
+		panels = p
+	} else if sb, ok := msg.Payload["storyboard"].(map[string]any); ok {
+		if p, ok := sb["panels"].([]any); ok {
+			panels = p
+		}
+	}
+
+	if len(panels) == 0 {
+		return &agent.TaskResult{Status: agent.TaskStatusFailed, Error: "no panels found in payload (expected 'panels' array or 'storyboard.panels')"}, nil
 	}
 
 	a.Logger().Info("batch generation", "panelCount", len(panels))

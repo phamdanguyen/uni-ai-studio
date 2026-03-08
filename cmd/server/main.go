@@ -81,10 +81,10 @@ func main() {
 
 	// Tool Registry — wraps all external AI providers
 	toolRegistry := tools.NewRegistry(tools.ProviderKeys{
-		FALKey:     os.Getenv("FAL_API_KEY"),
-		ArkKey:     os.Getenv("ARK_API_KEY"),
-		MiniMaxKey: os.Getenv("MINIMAX_API_KEY"),
-		ViduKey:    os.Getenv("VIDU_API_KEY"),
+		FALKey:     cfg.Media.FALKey,
+		ArkKey:     cfg.Media.ArkKey,
+		MiniMaxKey: cfg.Media.MiniMaxKey,
+		ViduKey:    cfg.Media.ViduKey,
 		GoogleKey:  cfg.LLM.GoogleAIKey,
 	}, logger)
 
@@ -158,9 +158,14 @@ func main() {
 
 	// Filmmaking Pipeline (with checkpoint support)
 	filmPipeline := pipeline.NewPipeline(bus, logger)
+	var checkpointStore *pipeline.CheckpointStore
 	if dbPool != nil {
-		checkpointStore := pipeline.NewCheckpointStore(dbPool, logger)
+		checkpointStore = pipeline.NewCheckpointStore(dbPool, logger)
 		filmPipeline.SetCheckpointStore(checkpointStore)
+	}
+	if cfg.Media.FALKey != "" {
+		filmPipeline.SetFALKey(cfg.Media.FALKey)
+		logger.Info("FAL media generation enabled")
 	}
 
 	// Agent Supervisor — monitors health, tracks error rates
@@ -392,6 +397,129 @@ func main() {
 	// OPTIONS handler for CORS preflight on settings
 	mux.HandleFunc("OPTIONS /settings/llm", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// GET /pipeline/{id} — get all stages for a project
+	mux.HandleFunc("GET /pipeline/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("id")
+		stages, err := checkpointStore.GetAllStages(r.Context(), projectID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"projectId": projectID,
+			"stages":    stages,
+		})
+	})
+
+	// PATCH /pipeline/{id}/stage/{stage}/output — overwrite stage output JSON
+	mux.HandleFunc("PATCH /pipeline/{id}/stage/{stage}/output", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("id")
+		stage := r.PathValue("stage")
+		var output map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&output); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if err := checkpointStore.UpdateStageOutput(r.Context(), projectID, pipeline.Stage(stage), output); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	})
+
+	// POST /pipeline/{id}/stage/{stage}/media — add external media URL to stage output
+	mux.HandleFunc("POST /pipeline/{id}/stage/{stage}/media", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("id")
+		stage := r.PathValue("stage")
+		var body struct {
+			URL      string `json:"url"`
+			Label    string `json:"label"`
+			MimeType string `json:"mimeType"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "url is required"})
+			return
+		}
+		// Build output map with injected media URL
+		output := map[string]any{
+			"userMedia": map[string]any{
+				"url":      body.URL,
+				"label":    body.Label,
+				"mimeType": body.MimeType,
+			},
+		}
+		if err := checkpointStore.UpdateStageOutput(r.Context(), projectID, pipeline.Stage(stage), output); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "media added", "url": body.URL})
+	})
+
+	// GET /projects — list all projects from pipeline_stages summary view
+	mux.HandleFunc("GET /projects", func(w http.ResponseWriter, r *http.Request) {
+		if dbPool == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		rows, err := dbPool.Query(r.Context(), `
+			SELECT project_id, total_stages, completed_stages, failed_stages,
+			       started_at, finished_at, last_updated, overall_status
+			FROM project_pipeline_summary
+			ORDER BY last_updated DESC
+			LIMIT 100`)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		type ProjectSummary struct {
+			ProjectID       string     `json:"projectId"`
+			TotalStages     int        `json:"totalStages"`
+			CompletedStages int        `json:"completedStages"`
+			FailedStages    int        `json:"failedStages"`
+			StartedAt       *time.Time `json:"startedAt,omitempty"`
+			FinishedAt      *time.Time `json:"finishedAt,omitempty"`
+			LastUpdated     time.Time  `json:"lastUpdated"`
+			OverallStatus   string     `json:"overallStatus"`
+		}
+
+		var projects []ProjectSummary
+		for rows.Next() {
+			var p ProjectSummary
+			if err := rows.Scan(&p.ProjectID, &p.TotalStages, &p.CompletedStages,
+				&p.FailedStages, &p.StartedAt, &p.FinishedAt, &p.LastUpdated, &p.OverallStatus); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			projects = append(projects, p)
+		}
+		if err := rows.Err(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"projects": projects,
+			"count":    len(projects),
+		})
 	})
 
 	server := &http.Server{

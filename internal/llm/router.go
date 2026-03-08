@@ -23,6 +23,9 @@ type Router struct {
 	logger     *slog.Logger
 	circuit    *CircuitBreaker
 
+	// Rate limiter: token bucket (4 req/s, burst 8)
+	rateCh chan struct{}
+
 	// Token budget tracking (per-project)
 	mu      sync.RWMutex
 	budgets map[string]*Budget
@@ -36,6 +39,22 @@ type Budget struct {
 
 // NewRouter creates a new LLM router.
 func NewRouter(cfg config.LLMConfig, logger *slog.Logger) *Router {
+	// Token bucket: 1 token every 250ms = 4 req/s, burst of 8
+	rateCh := make(chan struct{}, 8)
+	for i := 0; i < 8; i++ {
+		rateCh <- struct{}{}
+	}
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			select {
+			case rateCh <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
 	return &Router{
 		cfg: cfg,
 		httpClient: &http.Client{
@@ -44,6 +63,7 @@ func NewRouter(cfg config.LLMConfig, logger *slog.Logger) *Router {
 		logger:  logger.With("component", "llm-router"),
 		budgets: make(map[string]*Budget),
 		circuit: NewCircuitBreaker(5, 30*time.Second, logger),
+		rateCh:  rateCh,
 	}
 }
 
@@ -52,11 +72,8 @@ func (r *Router) Call(ctx context.Context, tier agent.ModelTier, systemPrompt, u
 	model := r.selectModel(tier)
 
 	reqBody := openRouterRequest{
-		Model: model,
-		Messages: []openRouterMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userPrompt},
-		},
+		Model:       model,
+		Messages:    r.buildMessages(model, systemPrompt, userPrompt),
 		Temperature: tierTemperature(tier),
 	}
 
@@ -75,6 +92,10 @@ func (r *Router) Call(ctx context.Context, tier agent.ModelTier, systemPrompt, u
 	req.Header.Set("Authorization", "Bearer "+r.cfg.OpenRouterAPIKey)
 	req.Header.Set("HTTP-Referer", "https://uni-ai.studio")
 	req.Header.Set("X-Title", "Uni AI Studio")
+
+	if err := r.waitForToken(ctx); err != nil {
+		return nil, err
+	}
 
 	if !r.circuit.Allow() {
 		return nil, fmt.Errorf("LLM circuit breaker open: provider temporarily unavailable")
@@ -132,13 +153,13 @@ func (r *Router) CallWithJSON(ctx context.Context, tier agent.ModelTier, systemP
 	enhancedSystem := systemPrompt + "\n\nYou MUST respond with valid JSON only. No markdown, no explanation."
 
 	reqBody := openRouterRequest{
-		Model: model,
-		Messages: []openRouterMessage{
-			{Role: "system", Content: enhancedSystem},
-			{Role: "user", Content: userPrompt},
-		},
-		Temperature:    tierTemperature(tier),
-		ResponseFormat: &openRouterResponseFormat{Type: "json_object"},
+		Model:       model,
+		Messages:    r.buildMessages(model, enhancedSystem, userPrompt),
+		Temperature: tierTemperature(tier),
+	}
+	// Only add json_object format for non-Gemma models
+	if !isGemmaModel(model) {
+		reqBody.ResponseFormat = &openRouterResponseFormat{Type: "json_object"}
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -156,6 +177,10 @@ func (r *Router) CallWithJSON(ctx context.Context, tier agent.ModelTier, systemP
 	req.Header.Set("Authorization", "Bearer "+r.cfg.OpenRouterAPIKey)
 	req.Header.Set("HTTP-Referer", "https://uni-ai.studio")
 	req.Header.Set("X-Title", "Uni AI Studio")
+
+	if err := r.waitForToken(ctx); err != nil {
+		return nil, err
+	}
 
 	if !r.circuit.Allow() {
 		return nil, fmt.Errorf("LLM circuit breaker open: provider temporarily unavailable")
@@ -356,6 +381,34 @@ func (r *Router) selectModel(tier agent.ModelTier) string {
 		return r.cfg.PremiumModel
 	default:
 		return r.cfg.StandardModel
+	}
+}
+
+// waitForToken blocks until a rate limit token is available or context is cancelled.
+func (r *Router) waitForToken(ctx context.Context) error {
+	select {
+	case <-r.rateCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isGemmaModel returns true for Gemma models that don't support system role.
+func isGemmaModel(model string) bool {
+	return len(model) >= 5 && model[:5] == "gemma" ||
+		len(model) >= 13 && model[:13] == "models/gemma-"
+}
+
+// buildMessages constructs the messages slice, merging system into user for Gemma models.
+func (r *Router) buildMessages(model, systemPrompt, userPrompt string) []openRouterMessage {
+	if isGemmaModel(model) {
+		combined := systemPrompt + "\n\n" + userPrompt
+		return []openRouterMessage{{Role: "user", Content: combined}}
+	}
+	return []openRouterMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
 	}
 }
 

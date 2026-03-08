@@ -16,6 +16,16 @@ type Config struct {
 	Redis    RedisConfig
 	Storage  StorageConfig
 	LLM      LLMConfig
+	Media    MediaConfig
+}
+
+// MediaConfig holds API keys for media generation providers.
+type MediaConfig struct {
+	FALKey     string
+	ArkKey     string
+	ViduKey    string
+	MiniMaxKey string
+	QwenKey    string
 }
 
 // ServerConfig holds HTTP server settings.
@@ -138,6 +148,13 @@ func Load() Config {
 			PremiumModel:      envStr("LLM_PREMIUM_MODEL", "anthropic/claude-opus-4-20250514"),
 			DefaultBudgetUSD:  envFloat("LLM_DEFAULT_BUDGET_USD", 10.0),
 			RequestTimeoutS:   envInt("LLM_REQUEST_TIMEOUT_S", 120),
+		},
+		Media: MediaConfig{
+			FALKey:     envStr("FAL_KEY", ""),
+			ArkKey:     envStr("ARK_KEY", ""),
+			ViduKey:    envStr("VIDU_KEY", ""),
+			MiniMaxKey: envStr("MINIMAX_KEY", ""),
+			QwenKey:    envStr("QWEN_KEY", ""),
 		},
 	}
 }

@@ -78,8 +78,9 @@ export default function Dashboard() {
         <div className="section-header">
           <span className="icon">⚡</span> Quick Actions
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 16 }}>
           <ActionCard href="/new" icon="▶" title="New Project" desc="Bắt đầu tạo phim AI" />
+          <ActionCard href="/projects" icon="🎬" title="Projects" desc="Xem tất cả dự án" />
           <ActionCard href="/agents" icon="⬡" title="Agent Explorer" desc="6 agents • 22 skills" />
           <ActionCard href="/tools" icon="⚡" title="Tools Gallery" desc="13 AI generators" />
           <ActionCard href="/settings" icon="⚙" title="LLM Settings" desc="Cấu hình model & provider" />

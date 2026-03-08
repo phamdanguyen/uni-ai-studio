@@ -4,8 +4,12 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +38,7 @@ type Pipeline struct {
 	logger     *slog.Logger
 	listeners  []ProgressListener
 	checkpoint *CheckpointStore
+	falKey     string
 }
 
 // ProgressListener receives pipeline progress updates (for SSE, webhooks, etc.)
@@ -69,6 +74,11 @@ func (p *Pipeline) SetCheckpointStore(cs *CheckpointStore) {
 	p.checkpoint = cs
 }
 
+// SetFALKey configures the FAL API key for inline media polling.
+func (p *Pipeline) SetFALKey(key string) {
+	p.falKey = key
+}
+
 // Run executes the full filmmaking pipeline for a project.
 func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResult, error) {
 	projectID := req.ProjectID
@@ -100,6 +110,10 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 			Message:     fmt.Sprintf("Starting %s", s.stage),
 			Timestamp:   time.Now(),
 		})
+		if p.checkpoint != nil {
+			input := buildStageInput(s.stage, &req)
+			_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, s.stage, "running", input, nil, nil)
+		}
 
 		stageResult, err := s.fn(ctx, &req)
 		if err != nil {
@@ -112,6 +126,9 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 				Message:     err.Error(),
 				Timestamp:   time.Now(),
 			})
+			if p.checkpoint != nil {
+				_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, s.stage, "failed", nil, nil, err)
+			}
 			result.Error = err.Error()
 			return result, err
 		}
@@ -129,21 +146,34 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 		})
 		if p.checkpoint != nil {
 			_ = p.checkpoint.Save(ctx, projectID, stageIdx, s.stage, &req)
+			_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, s.stage, "completed", nil, stageResult.Data, nil)
 		}
 		stageIdx++
 	}
 
 	// Characters and Locations run in parallel — they both only need Analysis
 	p.emit(ProgressEvent{ProjectID: projectID, Stage: StageCharacters, StageIndex: stageIdx, TotalStages: totalStages, Status: "started", Message: "Starting characters & locations (parallel)", Timestamp: time.Now()})
+	if p.checkpoint != nil {
+		_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, StageCharacters, "running", buildStageInput(StageCharacters, &req), nil, nil)
+		_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx+1, StageLocations, "running", buildStageInput(StageLocations, &req), nil, nil)
+	}
 	charResult, locResult, err := p.runCharactersAndLocations(ctx, &req)
 	if err != nil {
 		p.emit(ProgressEvent{ProjectID: projectID, Stage: StageCharacters, StageIndex: stageIdx, TotalStages: totalStages, Status: "failed", Message: err.Error(), Timestamp: time.Now()})
+		if p.checkpoint != nil {
+			_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, StageCharacters, "failed", nil, nil, err)
+		}
 		result.Error = err.Error()
 		return result, err
 	}
 	result.Stages[StageCharacters] = *charResult
 	result.Stages[StageLocations] = *locResult
 	p.emit(ProgressEvent{ProjectID: projectID, Stage: StageLocations, StageIndex: stageIdx + 1, TotalStages: totalStages, Status: "completed", Message: "Characters & locations complete", Timestamp: time.Now()})
+	if p.checkpoint != nil {
+		_ = p.checkpoint.Save(ctx, projectID, stageIdx+1, StageLocations, &req)
+		_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, StageCharacters, "completed", nil, charResult.Data, nil)
+		_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx+1, StageLocations, "completed", nil, locResult.Data, nil)
+	}
 	stageIdx += 2
 
 	// Sequential stages after the parallel section
@@ -168,6 +198,10 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 			Message:     fmt.Sprintf("Starting %s", s.stage),
 			Timestamp:   time.Now(),
 		})
+		if p.checkpoint != nil {
+			input := buildStageInput(s.stage, &req)
+			_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, s.stage, "running", input, nil, nil)
+		}
 
 		stageResult, err := s.fn(ctx, &req)
 		if err != nil {
@@ -180,6 +214,9 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 				Message:     err.Error(),
 				Timestamp:   time.Now(),
 			})
+			if p.checkpoint != nil {
+				_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, s.stage, "failed", nil, nil, err)
+			}
 			result.Error = err.Error()
 			return result, err
 		}
@@ -197,6 +234,7 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 		})
 		if p.checkpoint != nil {
 			_ = p.checkpoint.Save(ctx, projectID, stageIdx, s.stage, &req)
+			_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, s.stage, "completed", nil, stageResult.Data, nil)
 		}
 		stageIdx++
 	}
@@ -332,17 +370,29 @@ func (p *Pipeline) runStoryboard(ctx context.Context, req *PipelineRequest) (*St
 }
 
 func (p *Pipeline) runMediaGeneration(ctx context.Context, req *PipelineRequest) (*StageResult, error) {
+	// Build effective storyboard — if LLM failed to produce JSON panels, generate fallback panels from story
+	storyboard := req.Storyboard
+	if !hasPanels(storyboard) {
+		p.logger.Warn("storyboard has no parsed panels, generating fallback panels from story")
+		storyboard = p.generateFallbackPanels(req.Story)
+	}
+
 	resp, err := p.bus.Request(ctx, agent.Message{
 		To:      "media",
 		SkillID: "generate_batch",
 		Payload: map[string]any{
-			"storyboard": req.Storyboard,
+			"storyboard": storyboard,
 			"characters": req.Characters,
 			"locations":  req.Locations,
 		},
 	}, 300*time.Second) // 5min for batch generation
 	if err != nil {
 		return nil, fmt.Errorf("media generation: %w", err)
+	}
+
+	// Resolve async FAL externalIds → actual image URLs
+	if p.falKey != "" {
+		resp.Output = p.resolveMediaURLs(ctx, resp.Output)
 	}
 
 	req.Media = resp.Output
@@ -445,4 +495,230 @@ type StageResult struct {
 	Data    map[string]any `json:"data,omitempty"`
 }
 
+// hasPanels checks if storyboard output contains a parsed panels array.
+func hasPanels(storyboard map[string]any) bool {
+	if storyboard == nil {
+		return false
+	}
+	panels, ok := storyboard["panels"].([]any)
+	return ok && len(panels) > 0
+}
+
+// generateFallbackPanels creates simple scene panels from story text
+// when the storyboard LLM fails to produce structured JSON.
+func (p *Pipeline) generateFallbackPanels(story string) map[string]any {
+	// Split story into sentences and use each as a panel prompt
+	sentences := splitIntoScenes(story, 5)
+	panels := make([]map[string]any, len(sentences))
+	for i, s := range sentences {
+		panels[i] = map[string]any{
+			"index":       i,
+			"imagePrompt": fmt.Sprintf("Cinematic scene, film still: %s. High quality, detailed, atmospheric lighting.", s),
+			"description": s,
+		}
+	}
+	return map[string]any{
+		"panels":     panels,
+		"panelCount": len(panels),
+		"fallback":   true,
+	}
+}
+
+// splitIntoScenes splits text into at most maxScenes chunks by sentence boundaries.
+func splitIntoScenes(text string, maxScenes int) []string {
+	// Simple split by period/newline
+	var scenes []string
+	current := ""
+	for _, r := range text {
+		current += string(r)
+		if (r == '.' || r == '\n') && len(current) > 20 {
+			scenes = append(scenes, strings.TrimSpace(current))
+			current = ""
+		}
+	}
+	if strings.TrimSpace(current) != "" {
+		scenes = append(scenes, strings.TrimSpace(current))
+	}
+	if len(scenes) == 0 {
+		return []string{text}
+	}
+	// Merge if too many
+	if len(scenes) > maxScenes {
+		merged := make([]string, maxScenes)
+		chunkSize := len(scenes) / maxScenes
+		for i := 0; i < maxScenes; i++ {
+			start := i * chunkSize
+			end := start + chunkSize
+			if i == maxScenes-1 {
+				end = len(scenes)
+			}
+			merged[i] = strings.Join(scenes[start:end], " ")
+		}
+		return merged
+	}
+	return scenes
+}
+
+// buildStageInput returns the input payload for a given stage based on the
+// current pipeline request state. Called just before each stage executes so
+// that upstream results populated into req are included.
+func buildStageInput(stage Stage, req *PipelineRequest) map[string]any {
+	switch stage {
+	case StageAnalysis:
+		return map[string]any{"story": req.Story, "inputType": req.InputType}
+	case StagePlanning:
+		return map[string]any{"analysis": req.Analysis, "budget": req.Budget, "quality": req.QualityLevel}
+	case StageCharacters:
+		return map[string]any{"story": req.Story, "analysis": req.Analysis}
+	case StageLocations:
+		return map[string]any{"story": req.Story, "analysis": req.Analysis}
+	case StageStoryboard:
+		return map[string]any{"story": req.Story, "analysis": req.Analysis, "characters": req.Characters, "locations": req.Locations}
+	case StageMediaGen:
+		return map[string]any{"storyboard": req.Storyboard, "characters": req.Characters, "locations": req.Locations}
+	case StageQualityCheck:
+		return map[string]any{"media": req.Media, "storyboard": req.Storyboard}
+	case StageVoice:
+		return map[string]any{"story": req.Story, "characters": req.Characters, "storyboard": req.Storyboard}
+	case StageAssembly:
+		return map[string]any{"media": req.Media, "voices": req.Voices, "storyboard": req.Storyboard}
+	default:
+		return nil
+	}
+}
+
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// resolveMediaURLs walks through media output and replaces async externalIds with real URLs.
+func (p *Pipeline) resolveMediaURLs(ctx context.Context, output map[string]any) map[string]any {
+	results, ok := output["results"].([]any)
+	if !ok {
+		return output
+	}
+
+	resolved := make([]any, len(results))
+	for i, item := range results {
+		panelResult, ok := item.(map[string]any)
+		if !ok {
+			resolved[i] = item
+			continue
+		}
+
+		result, ok := panelResult["result"].(map[string]any)
+		if !ok {
+			resolved[i] = panelResult
+			continue
+		}
+
+		externalID, _ := result["externalId"].(string)
+		isAsync, _ := result["async"].(bool)
+
+		if isAsync && strings.HasPrefix(externalID, "FAL:") {
+			imageURL, err := p.pollFALResult(ctx, externalID)
+			if err != nil {
+				p.logger.Warn("FAL poll failed", "externalId", externalID, "error", err)
+				panelResult["imageUrl"] = ""
+				panelResult["error"] = err.Error()
+			} else {
+				panelResult["imageUrl"] = imageURL
+				panelResult["status"] = "completed"
+			}
+		}
+		resolved[i] = panelResult
+	}
+
+	output["results"] = resolved
+	return output
+}
+
+// pollFALResult polls the FAL queue until the task completes and returns the image URL.
+// ExternalID format: FAL:IMAGE:endpoint:requestId
+func (p *Pipeline) pollFALResult(ctx context.Context, externalID string) (string, error) {
+	parts := strings.SplitN(externalID, ":", 4)
+	if len(parts) < 4 {
+		return "", fmt.Errorf("invalid FAL external ID: %s", externalID)
+	}
+	mediaType, endpoint, requestID := parts[1], parts[2], parts[3]
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	statusURL := fmt.Sprintf("https://queue.fal.run/%s/requests/%s/status", endpoint, requestID)
+	headers := map[string]string{"Authorization": "Key " + p.falKey}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		data, err := falHTTPGet(ctx, client, statusURL, headers)
+		if err != nil {
+			return "", fmt.Errorf("poll status: %w", err)
+		}
+
+		status, _ := data["status"].(string)
+		switch status {
+		case "COMPLETED":
+			resultURL := fmt.Sprintf("https://queue.fal.run/%s/requests/%s", endpoint, requestID)
+			resultData, err := falHTTPGet(ctx, client, resultURL, headers)
+			if err != nil {
+				return "", fmt.Errorf("fetch result: %w", err)
+			}
+			return extractFALURL(resultData, mediaType), nil
+		case "FAILED":
+			errMsg, _ := data["error"].(string)
+			return "", fmt.Errorf("FAL task failed: %s", errMsg)
+		default:
+			// IN_QUEUE or IN_PROGRESS — wait and retry
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+}
+
+func falHTTPGet(ctx context.Context, client *http.Client, url string, headers map[string]string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return data, nil
+}
+
+func extractFALURL(data map[string]any, mediaType string) string {
+	switch mediaType {
+	case "IMAGE":
+		images, _ := data["images"].([]any)
+		if len(images) > 0 {
+			img, _ := images[0].(map[string]any)
+			url, _ := img["url"].(string)
+			return url
+		}
+	case "VIDEO":
+		video, _ := data["video"].(map[string]any)
+		url, _ := video["url"].(string)
+		return url
+	}
+	return ""
+}

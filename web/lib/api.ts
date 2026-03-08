@@ -51,6 +51,28 @@ export interface LLMSettings {
   requestTimeoutS: number;
 }
 
+export interface StageInfo {
+  stage: string;
+  stageIndex: number;
+  status: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  error?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface ProjectSummary {
+  projectId: string;
+  totalStages: number;
+  completedStages: number;
+  failedStages: number;
+  startedAt?: string;
+  finishedAt?: string;
+  lastUpdated: string;
+  overallStatus: string;
+}
+
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -62,7 +84,7 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => fetchJSON<HealthStatus>('/health'),
-  
+
   agents: {
     list: () => fetchJSON<{ agents: AgentCard[]; count: number }>('/agents'),
     get: (name: string) => fetchJSON<AgentCard>(`/agents/${name}`),
@@ -84,6 +106,22 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(req),
       }),
+    getStages: (projectId: string) =>
+      fetchJSON<{ projectId: string; stages: StageInfo[] }>(`/pipeline/${projectId}`),
+    updateStageOutput: (projectId: string, stage: string, output: Record<string, unknown>) =>
+      fetchJSON<{ status: string }>(`/pipeline/${projectId}/stage/${stage}/output`, {
+        method: 'PATCH',
+        body: JSON.stringify(output),
+      }),
+    addStageMedia: (projectId: string, stage: string, url: string, label: string, mimeType: string) =>
+      fetchJSON<{ status: string; url: string }>(`/pipeline/${projectId}/stage/${stage}/media`, {
+        method: 'POST',
+        body: JSON.stringify({ url, label, mimeType }),
+      }),
+  },
+
+  projects: {
+    list: () => fetchJSON<{ projects: ProjectSummary[]; count: number }>('/projects'),
   },
 
   settings: {
