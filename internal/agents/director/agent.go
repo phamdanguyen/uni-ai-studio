@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/uni-ai-studio/waoo-studio/internal/agent"
 	"github.com/uni-ai-studio/waoo-studio/lib/prompts"
@@ -150,7 +151,7 @@ func (a *Agent) orchestrateWorkflow(ctx context.Context, msg agent.Message) (*ag
 			"previousResults": results,
 		}
 
-		result, err := a.AskAgent(ctx, step.Agent, step.Skill, payload, 60_000_000_000)
+		result, err := a.AskAgent(ctx, step.Agent, step.Skill, payload, 60*time.Second)
 		if err != nil {
 			a.Logger().Error("step failed", "agent", step.Agent, "skill", step.Skill, "error", err)
 			return &agent.TaskResult{
