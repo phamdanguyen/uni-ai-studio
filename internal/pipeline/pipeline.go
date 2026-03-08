@@ -30,9 +30,10 @@ const (
 
 // Pipeline orchestrates the full filmmaking workflow.
 type Pipeline struct {
-	bus       agent.MessageBus
-	logger    *slog.Logger
-	listeners []ProgressListener
+	bus        agent.MessageBus
+	logger     *slog.Logger
+	listeners  []ProgressListener
+	checkpoint *CheckpointStore
 }
 
 // ProgressListener receives pipeline progress updates (for SSE, webhooks, etc.)
@@ -61,6 +62,11 @@ func NewPipeline(bus agent.MessageBus, logger *slog.Logger) *Pipeline {
 // OnProgress registers a listener for progress events.
 func (p *Pipeline) OnProgress(listener ProgressListener) {
 	p.listeners = append(p.listeners, listener)
+}
+
+// SetCheckpointStore enables checkpoint persistence for resume support.
+func (p *Pipeline) SetCheckpointStore(cs *CheckpointStore) {
+	p.checkpoint = cs
 }
 
 // Run executes the full filmmaking pipeline for a project.
@@ -121,6 +127,9 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 			Data:        stageResult.Data,
 			Timestamp:   time.Now(),
 		})
+		if p.checkpoint != nil {
+			_ = p.checkpoint.Save(ctx, projectID, stageIdx, s.stage, &req)
+		}
 		stageIdx++
 	}
 
@@ -186,6 +195,9 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 			Data:        stageResult.Data,
 			Timestamp:   time.Now(),
 		})
+		if p.checkpoint != nil {
+			_ = p.checkpoint.Save(ctx, projectID, stageIdx, s.stage, &req)
+		}
 		stageIdx++
 	}
 

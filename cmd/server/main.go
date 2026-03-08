@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	redis "github.com/redis/go-redis/v9"
 
 	"github.com/uni-ai-studio/waoo-studio/internal/agent"
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/character"
@@ -87,15 +88,28 @@ func main() {
 		GoogleKey:  cfg.LLM.GoogleAIKey,
 	}, logger)
 
-	// Tiered Memory (hot + cold via PostgreSQL)
+	// Tiered Memory (hot + warm Redis + cold PostgreSQL)
+	var warmBackend memory.WarmBackend
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		logger.Warn("Redis not available, running without warm memory", "error", err)
+	} else {
+		warmBackend = memory.NewRedisWarm(&redisClientAdapter{redisClient})
+		logger.Info("Redis connected", "host", cfg.Redis.Host, "port", cfg.Redis.Port)
+	}
+
 	var memStore *memory.Store
 	if dbPool != nil {
 		coldBackend := memory.NewPGCold(dbPool)
-		memStore = memory.NewStore(nil, coldBackend, logger) // nil warm = no Redis yet
+		memStore = memory.NewStore(warmBackend, coldBackend, logger)
 	} else {
-		memStore = memory.NewStore(nil, nil, logger)
+		memStore = memory.NewStore(warmBackend, nil, logger)
 	}
-	_ = memStore // used by agents in future
+	_ = memStore // available for agents in future iterations
 
 	// Async Task Poller with persistence
 	var taskPersist *poller.PersistentStore
@@ -142,8 +156,12 @@ func main() {
 		}
 	})
 
-	// Filmmaking Pipeline
+	// Filmmaking Pipeline (with checkpoint support)
 	filmPipeline := pipeline.NewPipeline(bus, logger)
+	if dbPool != nil {
+		checkpointStore := pipeline.NewCheckpointStore(dbPool, logger)
+		filmPipeline.SetCheckpointStore(checkpointStore)
+	}
 
 	// Agent Supervisor — monitors health, tracks error rates
 	supervisor := agent.NewSupervisor(logger)
@@ -357,13 +375,11 @@ func main() {
 
 	// GET /settings/llm — return current LLM config (masked keys)
 	mux.HandleFunc("GET /settings/llm", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		writeJSON(w, http.StatusOK, router.GetConfig())
 	})
 
 	// PUT /settings/llm — update runtime LLM config
 	mux.HandleFunc("PUT /settings/llm", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		var update llm.LLMSettingsJSON
 		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -373,17 +389,14 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
 	})
 
-	// OPTIONS handler for CORS preflight
+	// OPTIONS handler for CORS preflight on settings
 	mux.HandleFunc("OPTIONS /settings/llm", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.WriteHeader(http.StatusNoContent)
 	})
 
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      corsMiddleware(mux),
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: 0, // Disable for SSE
 	}
@@ -423,6 +436,41 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// corsMiddleware adds CORS headers to all responses.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// redisClientAdapter adapts go-redis Client to memory.RedisClient interface.
+type redisClientAdapter struct {
+	client *redis.Client
+}
+
+func (a *redisClientAdapter) Get(ctx context.Context, key string) (string, error) {
+	return a.client.Get(ctx, key).Result()
+}
+
+func (a *redisClientAdapter) Set(ctx context.Context, key string, value string, expiration time.Duration) error {
+	return a.client.Set(ctx, key, value, expiration).Err()
+}
+
+func (a *redisClientAdapter) Del(ctx context.Context, keys ...string) error {
+	return a.client.Del(ctx, keys...).Err()
+}
+
+func (a *redisClientAdapter) Scan(ctx context.Context, cursor uint64, match string, count int64) ([]string, uint64, error) {
+	return a.client.Scan(ctx, cursor, match, count).Result()
 }
 
 // initWorldState ensures essential DB tables exist and runs migrations.

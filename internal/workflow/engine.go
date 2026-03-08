@@ -229,11 +229,32 @@ func (e *Engine) Execute(ctx context.Context, run *Run) error {
 	return nil
 }
 
-func (e *Engine) buildStepInput(run *Run, _ Step) map[string]any {
-	// For now, pass through run input. Later: merge outputs from depended steps.
+func (e *Engine) buildStepInput(run *Run, step Step) map[string]any {
 	input := make(map[string]any)
 	for k, v := range run.Input {
 		input[k] = v
+	}
+	// Merge outputs from completed dependency steps
+	for _, depKey := range step.DependsOn {
+		for _, s := range run.Steps {
+			if s.Key == depKey {
+				if s.Fn != nil {
+					// Inline step — output not persisted in Steps slice,
+					// caller is responsible for passing outputs in run.Input
+					break
+				}
+			}
+		}
+		// Look for depKey output stored in run.Output map
+		if run.Output != nil {
+			if depOut, ok := run.Output[depKey]; ok {
+				if m, ok := depOut.(map[string]any); ok {
+					for k, v := range m {
+						input[k] = v
+					}
+				}
+			}
+		}
 	}
 	return input
 }

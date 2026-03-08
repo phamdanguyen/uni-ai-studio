@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/uni-ai-studio/waoo-studio/internal/agent"
 	"github.com/uni-ai-studio/waoo-studio/lib/prompts"
@@ -166,7 +167,7 @@ func (a *Agent) createStoryboard(ctx context.Context, msg agent.Message) (*agent
 	charResult, err := a.AskAgent(ctx, "character", "query_appearances", map[string]any{
 		"characters": charactersFullDescription,
 		"projectId":  msg.ProjectID,
-	}, 15_000_000_000)
+	}, 15*time.Second)
 	if err != nil {
 		a.Logger().Warn("character agent query failed, continuing without references", "error", err)
 	}
