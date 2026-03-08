@@ -1,0 +1,68 @@
+# WAOO Studio — Development Environment
+# PostgreSQL, NATS, Redis, MinIO
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: waoo-postgres
+    environment:
+      POSTGRES_USER: waoo
+      POSTGRES_PASSWORD: waoo_secret
+      POSTGRES_DB: waoo_studio
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waoo -d waoo_studio"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: waoo-nats
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"   # Client
+      - "8222:8222"   # Monitoring
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 4222 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: waoo-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: waoo-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  nats_data:
+  redis_data:
+  minio_data:

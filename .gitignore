@@ -1,0 +1,20 @@
+# Binaries
+*.exe
+*.exe~
+bin/
+
+# Environment
+.env
+
+# Go build cache
+*.test
+*.out
+
+# Node
+web/node_modules/
+web/.next/
+web/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
