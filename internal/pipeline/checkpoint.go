@@ -194,6 +194,42 @@ func (cs *CheckpointStore) GetAllStages(ctx context.Context, projectID string) (
 	return stages, rows.Err()
 }
 
+// UpdateStageInput overwrites the input JSONB of an existing pipeline stage.
+func (cs *CheckpointStore) UpdateStageInput(ctx context.Context, projectID string, stage Stage, input map[string]any) error {
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return fmt.Errorf("marshal input: %w", err)
+	}
+	_, err = cs.pool.Exec(ctx, `
+		UPDATE pipeline_stages
+		SET input = $3, updated_at = NOW()
+		WHERE project_id = $1 AND stage = $2`,
+		projectID, string(stage), inputJSON,
+	)
+	return err
+}
+
+// GetStageInput reads the stored input JSON for a single stage.
+func (cs *CheckpointStore) GetStageInput(ctx context.Context, projectID string, stage Stage) (map[string]any, error) {
+	var inputBytes []byte
+	err := cs.pool.QueryRow(ctx, `
+		SELECT input FROM pipeline_stages
+		WHERE project_id = $1 AND stage = $2`,
+		projectID, string(stage),
+	).Scan(&inputBytes)
+	if err != nil {
+		return nil, err
+	}
+	if inputBytes == nil {
+		return nil, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(inputBytes, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal input: %w", err)
+	}
+	return m, nil
+}
+
 // UpdateStageOutput overwrites the output JSONB of an existing pipeline stage.
 func (cs *CheckpointStore) UpdateStageOutput(ctx context.Context, projectID string, stage Stage, output map[string]any) error {
 	outputJSON, err := json.Marshal(output)

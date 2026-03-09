@@ -113,6 +113,16 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify(output),
       }),
+    updateStageInput: (projectId: string, stage: string, input: Record<string, unknown>) =>
+      fetchJSON<{ status: string }>(`/pipeline/${projectId}/stage/${stage}/input`, {
+        method: 'PATCH',
+        body: JSON.stringify(input),
+      }),
+    retryStage: (projectId: string, stage: string, inputOverride?: Record<string, unknown>) =>
+      fetchJSON<{ status: string; projectId: string; stage: string }>(
+        `/pipeline/${projectId}/retry/${stage}`,
+        { method: 'POST', body: JSON.stringify(inputOverride ?? {}) }
+      ),
     addStageMedia: (projectId: string, stage: string, url: string, label: string, mimeType: string) =>
       fetchJSON<{ status: string; url: string }>(`/pipeline/${projectId}/stage/${stage}/media`, {
         method: 'POST',

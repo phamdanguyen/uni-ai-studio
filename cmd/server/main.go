@@ -417,6 +417,53 @@ func main() {
 		})
 	})
 
+	// PATCH /pipeline/{id}/stage/{stage}/input — overwrite stage input JSON (before retry)
+	mux.HandleFunc("PATCH /pipeline/{id}/stage/{stage}/input", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("id")
+		stage := r.PathValue("stage")
+		var input map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if err := checkpointStore.UpdateStageInput(r.Context(), projectID, pipeline.Stage(stage), input); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	})
+
+	// POST /pipeline/{id}/retry/{stage} — re-run a single stage with optional input override
+	mux.HandleFunc("POST /pipeline/{id}/retry/{stage}", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("id")
+		stage := r.PathValue("stage")
+		var inputOverride map[string]any
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&inputOverride); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		go func() {
+			if err := filmPipeline.RetryStage(context.Background(), projectID, pipeline.Stage(stage), inputOverride); err != nil {
+				logger.Error("stage retry failed", "projectId", projectID, "stage", stage, "error", err)
+			}
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":    "retrying",
+			"projectId": projectID,
+			"stage":     stage,
+		})
+	})
+
 	// PATCH /pipeline/{id}/stage/{stage}/output — overwrite stage output JSON
 	mux.HandleFunc("PATCH /pipeline/{id}/stage/{stage}/output", func(w http.ResponseWriter, r *http.Request) {
 		if checkpointStore == nil {

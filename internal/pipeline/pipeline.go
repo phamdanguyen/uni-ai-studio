@@ -589,6 +589,153 @@ func buildStageInput(stage Stage, req *PipelineRequest) map[string]any {
 
 func ptrTime(t time.Time) *time.Time { return &t }
 
+// stageIndexMap maps stage names to their index in the pipeline.
+var stageIndexMap = map[Stage]int{
+	StageAnalysis: 0, StagePlanning: 1, StageCharacters: 2,
+	StageLocations: 3, StageStoryboard: 4, StageMediaGen: 5,
+	StageQualityCheck: 6, StageVoice: 7, StageAssembly: 8,
+}
+
+// stageRunners maps each stage to its run function.
+// Characters and Locations only run individually on retry (not parallel).
+func (p *Pipeline) stageRunner(stage Stage) func(context.Context, *PipelineRequest) (*StageResult, error) {
+	switch stage {
+	case StageAnalysis:
+		return p.runAnalysis
+	case StagePlanning:
+		return p.runPlanning
+	case StageCharacters:
+		return p.runCharacters
+	case StageLocations:
+		return p.runLocations
+	case StageStoryboard:
+		return p.runStoryboard
+	case StageMediaGen:
+		return p.runMediaGeneration
+	case StageQualityCheck:
+		return p.runQualityCheck
+	case StageVoice:
+		return p.runVoice
+	case StageAssembly:
+		return p.runAssembly
+	}
+	return nil
+}
+
+// RetryStage re-runs a single pipeline stage using the stored input from DB,
+// optionally overriding specific fields from inputOverride.
+// It emits SSE events identical to Run() and persists the new output.
+func (p *Pipeline) RetryStage(ctx context.Context, projectID string, stage Stage, inputOverride map[string]any) error {
+	if p.checkpoint == nil {
+		return fmt.Errorf("checkpoint store not available")
+	}
+
+	runner := p.stageRunner(stage)
+	if runner == nil {
+		return fmt.Errorf("unknown stage: %s", stage)
+	}
+
+	stageIdx := stageIndexMap[stage]
+	totalStages := 9
+
+	// Load stored input from DB
+	storedInput, err := p.checkpoint.GetStageInput(ctx, projectID, stage)
+	if err != nil {
+		return fmt.Errorf("load stage input: %w", err)
+	}
+	if storedInput == nil {
+		storedInput = map[string]any{}
+	}
+
+	// Merge override on top of stored input
+	for k, v := range inputOverride {
+		storedInput[k] = v
+	}
+
+	// Persist the merged input before running
+	_ = p.checkpoint.UpdateStageInput(ctx, projectID, stage, storedInput)
+
+	// Build a minimal PipelineRequest from the merged input
+	req := &PipelineRequest{ProjectID: projectID}
+	if v, ok := storedInput["story"].(string); ok {
+		req.Story = v
+	}
+	if v, ok := storedInput["inputType"].(string); ok {
+		req.InputType = v
+	}
+	if v, ok := storedInput["budget"].(string); ok {
+		req.Budget = v
+	}
+	if v, ok := storedInput["quality"].(string); ok {
+		req.QualityLevel = v
+	}
+	if v, ok := storedInput["analysis"].(map[string]any); ok {
+		req.Analysis = v
+	}
+	if v, ok := storedInput["characters"].(map[string]any); ok {
+		req.Characters = v
+	}
+	if v, ok := storedInput["locations"].(map[string]any); ok {
+		req.Locations = v
+	}
+	if v, ok := storedInput["storyboard"].(map[string]any); ok {
+		req.Storyboard = v
+	}
+	if v, ok := storedInput["media"].(map[string]any); ok {
+		req.Media = v
+	}
+	if v, ok := storedInput["voices"].(map[string]any); ok {
+		req.Voices = v
+	}
+
+	// Emit "started"
+	p.emit(ProgressEvent{
+		ProjectID:   projectID,
+		Stage:       stage,
+		StageIndex:  stageIdx,
+		TotalStages: totalStages,
+		Status:      "started",
+		Message:     fmt.Sprintf("Retrying %s", stage),
+		Timestamp:   time.Now(),
+	})
+	_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, stage, "running", storedInput, nil, nil)
+
+	// Run the stage
+	result, err := runner(ctx, req)
+	if err != nil {
+		p.emit(ProgressEvent{
+			ProjectID:   projectID,
+			Stage:       stage,
+			StageIndex:  stageIdx,
+			TotalStages: totalStages,
+			Status:      "failed",
+			Message:     err.Error(),
+			Timestamp:   time.Now(),
+		})
+		_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, stage, "failed", nil, nil, err)
+		return fmt.Errorf("stage %s failed: %w", stage, err)
+	}
+
+	// Resolve FAL media URLs if applicable
+	if stage == StageMediaGen && p.falKey != "" {
+		result.Data = p.resolveMediaURLs(ctx, result.Data)
+	}
+
+	p.emit(ProgressEvent{
+		ProjectID:   projectID,
+		Stage:       stage,
+		StageIndex:  stageIdx,
+		TotalStages: totalStages,
+		Status:      "completed",
+		Message:     result.Summary,
+		Data:        result.Data,
+		Timestamp:   time.Now(),
+	})
+	_ = p.checkpoint.SaveStage(ctx, projectID, stageIdx, stage, "completed", nil, result.Data, nil)
+
+	return nil
+}
+
 // resolveMediaURLs walks through media output and replaces async externalIds with real URLs.
 func (p *Pipeline) resolveMediaURLs(ctx context.Context, output map[string]any) map[string]any {
 	results, ok := output["results"].([]any)
