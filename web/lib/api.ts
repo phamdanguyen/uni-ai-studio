@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8082';
 
 export interface AgentCard {
   name: string;
@@ -73,6 +73,16 @@ export interface ProjectSummary {
   overallStatus: string;
 }
 
+export type AgentModelConfig = {
+  flash: string;
+  standard: string;
+  premium: string;
+};
+
+export type AgentModelsConfig = {
+  agents: Record<string, AgentModelConfig>;
+};
+
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -141,5 +151,16 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+  },
+
+  agentModels: {
+    get: (): Promise<AgentModelsConfig> =>
+      fetchJSON<AgentModelsConfig>('/settings/agents'),
+    update: (config: AgentModelsConfig): Promise<void> =>
+      fetch(`${API_BASE}/settings/agents`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      }).then(r => { if (!r.ok) throw new Error('Failed to update'); }),
   },
 };

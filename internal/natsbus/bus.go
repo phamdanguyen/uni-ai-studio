@@ -141,6 +141,38 @@ func (b *Bus) Subscribe(agentName string, handler agent.MessageHandler) error {
 	return nil
 }
 
+// SubscribeOnce registers a one-time handler for a raw NATS subject.
+// Used by AutopilotPipeline to listen for Director progress events.
+// Unlike Subscribe(), this binds directly to the subject without queue groups
+// so every subscriber receives all messages (fan-out for SSE broadcasting).
+func (b *Bus) SubscribeOnce(subject string, handler agent.MessageHandler) error {
+	sub, err := b.conn.Subscribe(subject, func(natsMsg *nats.Msg) {
+		var msg agent.Message
+		if err := json.Unmarshal(natsMsg.Data, &msg); err != nil {
+			b.logger.Error("unmarshal event message", "error", err, "subject", natsMsg.Subject)
+			return
+		}
+
+		ctx := context.Background()
+		if _, err := handler(ctx, msg); err != nil {
+			b.logger.Warn("event handler error", "subject", subject, "error", err)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe once to %s: %w", subject, err)
+	}
+
+	b.subs = append(b.subs, sub)
+	b.logger.Info("subscribed (fan-out)", "subject", subject)
+	return nil
+}
+
+// PublishRaw publishes raw bytes to a NATS subject.
+// Used by Director to publish pipeline progress events.
+func (b *Bus) PublishRaw(subject string, data []byte) error {
+	return b.conn.Publish(subject, data)
+}
+
 // Close drains and closes the NATS connection.
 func (b *Bus) Close() error {
 	b.logger.Info("draining NATS connection")

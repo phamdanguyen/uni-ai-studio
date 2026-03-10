@@ -17,6 +17,7 @@ type BaseAgent struct {
 	router ModelRouter
 	tools  ToolRegistry
 	logger *slog.Logger
+	name   string // agent name for model routing
 }
 
 // NewBaseAgent creates a new BaseAgent with the given dependencies.
@@ -27,6 +28,7 @@ func NewBaseAgent(card AgentCard, bus MessageBus, router ModelRouter, tools Tool
 		router: router,
 		tools:  tools,
 		logger: logger.With("agent", card.Name),
+		name:   card.Name,
 	}
 }
 
@@ -46,7 +48,7 @@ func (b *BaseAgent) Logger() *slog.Logger {
 }
 
 // CallLLM makes an LLM call using the configured model router.
-// The tier determines which model class is used (flash/standard/premium).
+// Automatically uses per-agent model override if configured; falls back to global tier model.
 func (b *BaseAgent) CallLLM(ctx context.Context, tier ModelTier, systemPrompt, userPrompt string) (*LLMResponse, error) {
 	b.logger.Info("calling LLM",
 		"tier", tier,
@@ -54,7 +56,7 @@ func (b *BaseAgent) CallLLM(ctx context.Context, tier ModelTier, systemPrompt, u
 		"userPromptLen", len(userPrompt),
 	)
 
-	resp, err := b.router.Call(ctx, tier, systemPrompt, userPrompt)
+	resp, err := b.router.CallForAgent(ctx, b.name, tier, systemPrompt, userPrompt)
 	if err != nil {
 		b.logger.Error("LLM call failed", "tier", tier, "error", err)
 		return nil, fmt.Errorf("llm call (tier=%s): %w", tier, err)
@@ -68,6 +70,43 @@ func (b *BaseAgent) CallLLM(ctx context.Context, tier ModelTier, systemPrompt, u
 	)
 
 	return resp, nil
+}
+
+// CallLLMWithJSON makes an LLM call expecting structured JSON output.
+// Automatically uses per-agent model override if configured; falls back to global tier model.
+func (b *BaseAgent) CallLLMWithJSON(ctx context.Context, tier ModelTier, systemPrompt, userPrompt string, schema any) (*LLMResponse, error) {
+	b.logger.Info("calling LLM with JSON",
+		"tier", tier,
+		"systemPromptLen", len(systemPrompt),
+		"userPromptLen", len(userPrompt),
+	)
+
+	resp, err := b.router.CallWithJSONForAgent(ctx, b.name, tier, systemPrompt, userPrompt, schema)
+	if err != nil {
+		b.logger.Error("LLM JSON call failed", "tier", tier, "error", err)
+		return nil, fmt.Errorf("llm json call (tier=%s): %w", tier, err)
+	}
+
+	b.logger.Info("LLM JSON call completed",
+		"tier", tier,
+		"model", resp.Model,
+		"inputTokens", resp.Usage.InputTokens,
+		"outputTokens", resp.Usage.OutputTokens,
+	)
+
+	return resp, nil
+}
+
+// CallLLMForAgent is an explicit variant that passes agent name for model routing.
+// Identical to CallLLM but provided for clarity in code that wants to be explicit.
+func (b *BaseAgent) CallLLMForAgent(ctx context.Context, tier ModelTier, systemPrompt, userPrompt string) (*LLMResponse, error) {
+	return b.CallLLM(ctx, tier, systemPrompt, userPrompt)
+}
+
+// CallLLMWithJSONForAgent is an explicit variant that passes agent name for model routing.
+// Identical to CallLLMWithJSON but provided for clarity.
+func (b *BaseAgent) CallLLMWithJSONForAgent(ctx context.Context, tier ModelTier, systemPrompt, userPrompt string, schema any) (*LLMResponse, error) {
+	return b.CallLLMWithJSON(ctx, tier, systemPrompt, userPrompt, schema)
 }
 
 // AskAgent sends a request to another agent and waits for a response.
@@ -112,6 +151,12 @@ func (b *BaseAgent) NotifyAgent(ctx context.Context, targetAgent, skillID string
 	}
 
 	return b.bus.Publish(ctx, msg)
+}
+
+// BusRef returns the underlying MessageBus.
+// Used by agents that need to publish raw events (e.g. Director → NATS pipeline events).
+func (b *BaseAgent) BusRef() MessageBus {
+	return b.bus
 }
 
 // UseTool executes a registered tool by name.

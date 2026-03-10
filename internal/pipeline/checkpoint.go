@@ -13,11 +13,11 @@ import (
 
 // Checkpoint stores pipeline state for resume after failure.
 type Checkpoint struct {
-	ProjectID      string         `json:"projectId"`
-	LastStage      Stage          `json:"lastStage"`
-	LastStageIndex int            `json:"lastStageIndex"`
+	ProjectID        string                     `json:"projectId"`
+	LastStage        Stage                      `json:"lastStage"`
+	LastStageIndex   int                        `json:"lastStageIndex"`
 	IntermediateData map[string]json.RawMessage `json:"intermediateData"`
-	CreatedAt      time.Time      `json:"createdAt"`
+	CreatedAt        time.Time                  `json:"createdAt"`
 }
 
 // CheckpointStore persists pipeline checkpoints to PostgreSQL.
@@ -45,6 +45,9 @@ func (cs *CheckpointStore) Save(ctx context.Context, projectID string, stageInde
 		"storyboard": req.Storyboard,
 		"media":      req.Media,
 		"voices":     req.Voices,
+		"clips":      req.Clips,
+		"screenplays": req.Screenplays,
+		"storyboards": req.Storyboards,
 	}
 
 	for k, v := range fields {
@@ -230,6 +233,124 @@ func (cs *CheckpointStore) GetStageInput(ctx context.Context, projectID string, 
 	return m, nil
 }
 
+// --- pipeline_runs helpers (dual-mode state) ---
+
+// UpsertRunState creates or updates the run state row for a project.
+func (cs *CheckpointStore) UpsertRunState(ctx context.Context, state RunState) error {
+	_, err := cs.pool.Exec(ctx, `
+		INSERT INTO pipeline_runs
+		    (project_id, execution_mode, current_stage, current_status, story,
+		     input_type, budget, quality_level, error, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+		ON CONFLICT (project_id) DO UPDATE SET
+		    execution_mode  = EXCLUDED.execution_mode,
+		    current_stage   = EXCLUDED.current_stage,
+		    current_status  = EXCLUDED.current_status,
+		    error           = EXCLUDED.error,
+		    updated_at      = NOW()`,
+		state.ProjectID, string(state.Mode),
+		string(state.CurrentStage), string(state.CurrentStatus),
+		"", "novel", "medium", "standard", // story/meta stored in pipeline_stages input
+		state.Error,
+	)
+	return err
+}
+
+// UpsertRunStateFull upserts run state including story metadata.
+func (cs *CheckpointStore) UpsertRunStateFull(ctx context.Context, projectID string, mode ExecutionMode, stage Stage, status StepStatus, req *PipelineRequest, errMsg string) error {
+	_, err := cs.pool.Exec(ctx, `
+		INSERT INTO pipeline_runs
+		    (project_id, execution_mode, current_stage, current_status, story,
+		     input_type, budget, quality_level, error, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+		ON CONFLICT (project_id) DO UPDATE SET
+		    execution_mode  = EXCLUDED.execution_mode,
+		    current_stage   = EXCLUDED.current_stage,
+		    current_status  = EXCLUDED.current_status,
+		    story           = EXCLUDED.story,
+		    input_type      = EXCLUDED.input_type,
+		    budget          = EXCLUDED.budget,
+		    quality_level   = EXCLUDED.quality_level,
+		    error           = EXCLUDED.error,
+		    updated_at      = NOW()`,
+		projectID, string(mode), string(stage), string(status),
+		req.Story, req.InputType, req.Budget, req.QualityLevel, errMsg,
+	)
+	return err
+}
+
+// MarkRunCompleted sets a run as completed with timestamp.
+func (cs *CheckpointStore) MarkRunCompleted(ctx context.Context, projectID string) error {
+	_, err := cs.pool.Exec(ctx, `
+		UPDATE pipeline_runs
+		SET current_status = 'completed', completed_at = NOW(), updated_at = NOW()
+		WHERE project_id = $1`, projectID)
+	return err
+}
+
+// MarkRunFailed sets a run as failed with error message.
+func (cs *CheckpointStore) MarkRunFailed(ctx context.Context, projectID, errMsg string) error {
+	_, err := cs.pool.Exec(ctx, `
+		UPDATE pipeline_runs
+		SET current_status = 'failed', error = $2, updated_at = NOW()
+		WHERE project_id = $1`, projectID, errMsg)
+	return err
+}
+
+// GetRunState retrieves the current run state for a project.
+func (cs *CheckpointStore) GetRunState(ctx context.Context, projectID string) (*RunState, error) {
+	var mode, stage, status, errMsg string
+	err := cs.pool.QueryRow(ctx, `
+		SELECT execution_mode, current_stage, current_status, COALESCE(error, '')
+		FROM pipeline_runs WHERE project_id = $1`, projectID,
+	).Scan(&mode, &stage, &status, &errMsg)
+	if err != nil {
+		return nil, err
+	}
+	return &RunState{
+		ProjectID:     projectID,
+		Mode:          ExecutionMode(mode),
+		CurrentStage:  Stage(stage),
+		CurrentStatus: StepStatus(status),
+		Error:         errMsg,
+	}, nil
+}
+
+// GetRunMeta retrieves story metadata for a project run.
+func (cs *CheckpointStore) GetRunMeta(ctx context.Context, projectID string) (story, inputType, budget, qualityLevel string, err error) {
+	err = cs.pool.QueryRow(ctx, `
+		SELECT COALESCE(story,''), COALESCE(input_type,'novel'),
+		       COALESCE(budget,'medium'), COALESCE(quality_level,'standard')
+		FROM pipeline_runs WHERE project_id = $1`, projectID,
+	).Scan(&story, &inputType, &budget, &qualityLevel)
+	if err != nil {
+		story, inputType, budget, qualityLevel = "", "", "", ""
+		err = nil
+	}
+	return
+}
+
+// GetStageOutput reads the stored output JSON for a single stage.
+func (cs *CheckpointStore) GetStageOutput(ctx context.Context, projectID string, stage Stage) (map[string]any, error) {
+	var outputBytes []byte
+	err := cs.pool.QueryRow(ctx, `
+		SELECT output FROM pipeline_stages
+		WHERE project_id = $1 AND stage = $2`,
+		projectID, string(stage),
+	).Scan(&outputBytes)
+	if err != nil {
+		return nil, err
+	}
+	if outputBytes == nil {
+		return nil, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(outputBytes, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal output: %w", err)
+	}
+	return m, nil
+}
+
 // UpdateStageOutput overwrites the output JSONB of an existing pipeline stage.
 func (cs *CheckpointStore) UpdateStageOutput(ctx context.Context, projectID string, stage Stage, output map[string]any) error {
 	outputJSON, err := json.Marshal(output)
@@ -263,6 +384,28 @@ func (cs *CheckpointStore) Restore(checkpoint *Checkpoint, req *PipelineRequest)
 	restore("storyboard", &req.Storyboard)
 	restore("media", &req.Media)
 	restore("voices", &req.Voices)
+
+	// Restore clips
+	if raw, ok := checkpoint.IntermediateData["clips"]; ok {
+		var clips []ClipData
+		if err := json.Unmarshal(raw, &clips); err == nil {
+			req.Clips = clips
+		}
+	}
+	// Restore screenplays
+	if raw, ok := checkpoint.IntermediateData["screenplays"]; ok {
+		var sps []ScreenplayData
+		if err := json.Unmarshal(raw, &sps); err == nil {
+			req.Screenplays = sps
+		}
+	}
+	// Restore storyboards
+	if raw, ok := checkpoint.IntermediateData["storyboards"]; ok {
+		var sbs []map[string]any
+		if err := json.Unmarshal(raw, &sbs); err == nil {
+			req.Storyboards = sbs
+		}
+	}
 
 	return nil
 }

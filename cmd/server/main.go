@@ -156,17 +156,28 @@ func main() {
 		}
 	})
 
-	// Filmmaking Pipeline (with checkpoint support)
-	filmPipeline := pipeline.NewPipeline(bus, logger)
+	// Filmmaking Pipeline — dual mode: Autopilot (A2A) + Step-by-Step (human-gated)
 	var checkpointStore *pipeline.CheckpointStore
 	if dbPool != nil {
 		checkpointStore = pipeline.NewCheckpointStore(dbPool, logger)
-		filmPipeline.SetCheckpointStore(checkpointStore)
+	}
+
+	autopilotPipeline := pipeline.NewAutopilotPipeline(bus, logger)
+	stepByStepPipeline := pipeline.NewStepByStepPipeline(bus, logger)
+
+	if checkpointStore != nil {
+		autopilotPipeline.SetCheckpointStore(checkpointStore)
+		stepByStepPipeline.SetCheckpointStore(checkpointStore)
 	}
 	if cfg.Media.FALKey != "" {
-		filmPipeline.SetFALKey(cfg.Media.FALKey)
+		autopilotPipeline.SetFALKey(cfg.Media.FALKey)
+		stepByStepPipeline.SetFALKey(cfg.Media.FALKey)
 		logger.Info("FAL media generation enabled")
 	}
+
+	// Shared SSE broadcast: cả 2 pipeline mode forward events vào 1 channel per project
+	// SSE handler tạo channel riêng cho từng kết nối; pipeline listeners ghi vào channel đó.
+	// Dùng closure-based listener được register khi SSE client kết nối (xem bên dưới).
 
 	// Agent Supervisor — monitors health, tracks error rates
 	supervisor := agent.NewSupervisor(logger)
@@ -217,9 +228,15 @@ func main() {
 				"GET  /tools",
 				"POST /pipeline/start",
 				"GET  /pipeline/progress/{projectId}",
+				"GET  /pipeline/{id}",
+				"GET  /pipeline/{projectId}/steps/run-state",
+				"GET  /pipeline/{projectId}/steps/current",
+				"POST /pipeline/{projectId}/steps/next",
 				"POST /webhooks/{provider}",
 				"GET  /settings/llm",
 				"PUT  /settings/llm",
+				"GET  /settings/agents",
+				"PUT  /settings/agents",
 			},
 		})
 	})
@@ -304,7 +321,7 @@ func main() {
 		})
 	})
 
-	// Start filmmaking pipeline
+	// Start filmmaking pipeline — route theo mode
 	mux.HandleFunc("POST /pipeline/start", func(w http.ResponseWriter, r *http.Request) {
 		var req pipeline.PipelineRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -312,24 +329,41 @@ func main() {
 			return
 		}
 
-		// Run pipeline asynchronously
-		go func() {
-			result, err := filmPipeline.Run(context.Background(), req)
-			if err != nil {
-				logger.Error("pipeline failed", "projectId", req.ProjectID, "error", err)
+		// Default mode là autopilot
+		if req.Mode == "" {
+			req.Mode = string(pipeline.ModeAutopilot)
+		}
+
+		switch pipeline.ExecutionMode(req.Mode) {
+		case pipeline.ModeStepByStep:
+			if checkpointStore == nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+					"error": "step-by-step mode requires database",
+				})
 				return
 			}
-			logger.Info("pipeline completed", "projectId", result.ProjectID)
-		}()
+			go func() {
+				if err := stepByStepPipeline.Start(context.Background(), req); err != nil {
+					logger.Error("step-by-step pipeline failed", "projectId", req.ProjectID, "error", err)
+				}
+			}()
+		default: // ModeAutopilot
+			go func() {
+				if err := autopilotPipeline.Start(context.Background(), req); err != nil {
+					logger.Error("autopilot pipeline failed", "projectId", req.ProjectID, "error", err)
+				}
+			}()
+		}
 
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"status":    "started",
 			"projectId": req.ProjectID,
+			"mode":      req.Mode,
 			"message":   "Pipeline started in background",
 		})
 	})
 
-	// Pipeline progress SSE
+	// Pipeline progress SSE — nhận events từ cả autopilot và step-by-step
 	mux.HandleFunc("GET /pipeline/progress/{projectId}", func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -343,16 +377,19 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 
 		projectID := r.PathValue("projectId")
-		events := make(chan pipeline.ProgressEvent, 10)
+		events := make(chan pipeline.ProgressEvent, 20)
 
-		filmPipeline.OnProgress(func(event pipeline.ProgressEvent) {
+		// Listener filter theo projectID — đăng ký vào cả 2 pipeline
+		listener := func(event pipeline.ProgressEvent) {
 			if event.ProjectID == projectID {
 				select {
 				case events <- event:
 				default: // Channel full, skip
 				}
 			}
-		})
+		}
+		autopilotPipeline.OnProgress(listener)
+		stepByStepPipeline.OnProgress(listener)
 
 		for {
 			select {
@@ -399,6 +436,27 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+
+	// GET /settings/agents — return per-agent model overrides
+	mux.HandleFunc("GET /settings/agents", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, router.GetAgentModelsConfig())
+	})
+
+	// PUT /settings/agents — update per-agent model overrides
+	mux.HandleFunc("PUT /settings/agents", func(w http.ResponseWriter, r *http.Request) {
+		var update llm.AgentModelsJSON
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		router.UpdateAgentModelsConfig(update)
+		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	})
+
+	// OPTIONS /settings/agents — CORS preflight
+	mux.HandleFunc("OPTIONS /settings/agents", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	// GET /pipeline/{id} — get all stages for a project
 	mux.HandleFunc("GET /pipeline/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if checkpointStore == nil {
@@ -437,7 +495,7 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
 	})
 
-	// POST /pipeline/{id}/retry/{stage} — re-run a single stage with optional input override
+	// POST /pipeline/{id}/retry/{stage} — re-run a single stage with optional input override (step-by-step mode)
 	mux.HandleFunc("POST /pipeline/{id}/retry/{stage}", func(w http.ResponseWriter, r *http.Request) {
 		if checkpointStore == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
@@ -452,15 +510,18 @@ func main() {
 				return
 			}
 		}
-		go func() {
-			if err := filmPipeline.RetryStage(context.Background(), projectID, pipeline.Stage(stage), inputOverride); err != nil {
-				logger.Error("stage retry failed", "projectId", projectID, "stage", stage, "error", err)
+		// Ghi đè input nếu có
+		if inputOverride != nil {
+			if err := checkpointStore.UpdateStageInput(r.Context(), projectID, pipeline.Stage(stage), inputOverride); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
 			}
-		}()
+		}
 		writeJSON(w, http.StatusAccepted, map[string]any{
-			"status":    "retrying",
+			"status":    "input_updated",
 			"projectId": projectID,
 			"stage":     stage,
+			"message":   "Call POST /pipeline/{id}/next to re-run from this stage",
 		})
 	})
 
@@ -518,6 +579,71 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "media added", "url": body.URL})
+	})
+
+	// --- Step-by-Step pipeline API ---
+	// Dùng suffix /steps/ để tránh conflict với /pipeline/{id}/retry/{stage}
+
+	// GET /pipeline/{projectId}/steps/run-state — trả về execution mode + current status
+	mux.HandleFunc("GET /pipeline/{projectId}/steps/run-state", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("projectId")
+		state, err := checkpointStore.GetRunState(r.Context(), projectID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "run state not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, state)
+	})
+
+	// GET /pipeline/{projectId}/steps/current — trả về bước hiện tại để UI hiển thị review panel
+	mux.HandleFunc("GET /pipeline/{projectId}/steps/current", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("projectId")
+		stepInfo, err := stepByStepPipeline.GetCurrentStep(r.Context(), projectID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, stepInfo)
+	})
+
+	// POST /pipeline/{projectId}/steps/next — approve bước hiện tại và chạy bước tiếp theo
+	// Body (optional): {"editedOutput": {...}} để override output trước khi chạy tiếp
+	mux.HandleFunc("POST /pipeline/{projectId}/steps/next", func(w http.ResponseWriter, r *http.Request) {
+		if checkpointStore == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
+			return
+		}
+		projectID := r.PathValue("projectId")
+
+		var body struct {
+			EditedOutput map[string]any `json:"editedOutput"`
+		}
+		if r.ContentLength > 0 {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+
+		go func() {
+			if err := stepByStepPipeline.RunNextStep(context.Background(), projectID, body.EditedOutput); err != nil {
+				logger.Error("step-by-step next step failed", "projectId", projectID, "error", err)
+			}
+		}()
+
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":    "running",
+			"projectId": projectID,
+			"message":   "Next step started",
+		})
 	})
 
 	// GET /projects — list all projects from pipeline_stages summary view

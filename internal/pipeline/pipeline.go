@@ -1,5 +1,5 @@
 // Package pipeline defines the full filmmaking workflow.
-// Story → Director → Characters → Locations → Storyboard → Media → Voice → Output
+// Story → Director → Characters → Locations → Segmentation → Screenplay → Storyboard → Media → Voice → Output
 package pipeline
 
 import (
@@ -20,15 +20,17 @@ import (
 type Stage string
 
 const (
-	StageAnalysis     Stage = "analysis"     // Director analyzes story
-	StagePlanning     Stage = "planning"     // Director plans pipeline
-	StageCharacters   Stage = "characters"   // Character agent designs characters
-	StageLocations    Stage = "locations"    // Location agent designs locations
+	StageAnalysis     Stage = "analysis"      // Director analyzes story
+	StagePlanning     Stage = "planning"      // Director plans pipeline
+	StageCharacters   Stage = "characters"    // Character agent designs characters
+	StageLocations    Stage = "locations"     // Location agent designs locations
+	StageSegmentation Stage = "segmentation" // Director chia story → N clips
+	StageScreenplay   Stage = "screenplay"   // Director convert từng clip → screenplay JSON
 	StageStoryboard   Stage = "storyboard"   // Storyboard agent creates panels
 	StageMediaGen     Stage = "media_gen"    // Media agent generates images/videos
 	StageQualityCheck Stage = "quality_check" // Quality gate evaluates output
-	StageVoice        Stage = "voice"        // Voice agent generates TTS + lip sync
-	StageAssembly     Stage = "assembly"     // Final assembly
+	StageVoice        Stage = "voice"         // Voice agent generates TTS + lip sync
+	StageAssembly     Stage = "assembly"      // Final assembly
 	StageComplete     Stage = "complete"
 )
 
@@ -54,6 +56,21 @@ type ProgressEvent struct {
 	Message     string    `json:"message"`
 	Data        any       `json:"data,omitempty"`
 	Timestamp   time.Time `json:"timestamp"`
+}
+
+// ClipData là một đoạn text đã được Director phân đoạn
+type ClipData struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	Order   int    `json:"order"`
+}
+
+// ScreenplayData là kịch bản được convert từ một clip
+type ScreenplayData struct {
+	ClipID     string `json:"clipId"`
+	Title      string `json:"title"`
+	Screenplay string `json:"screenplay"` // JSON string từ LLM
 }
 
 // NewPipeline creates a new filmmaking pipeline.
@@ -97,7 +114,7 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 		{StagePlanning, p.runPlanning},
 	}
 
-	totalStages := 9 // fixed count for SSE progress reporting
+	totalStages := 11 // fixed count for SSE progress reporting
 	stageIdx := 0
 
 	for _, s := range seqStages {
@@ -181,7 +198,9 @@ func (p *Pipeline) Run(ctx context.Context, req PipelineRequest) (*PipelineResul
 		stage Stage
 		fn    func(context.Context, *PipelineRequest) (*StageResult, error)
 	}{
-		{StageStoryboard, p.runStoryboard},
+		{StageSegmentation, p.runSegmentation},
+		{StageScreenplay, p.runScreenplays},
+		{StageStoryboard, p.runStoryboards},
 		{StageMediaGen, p.runMediaGeneration},
 		{StageQualityCheck, p.runQualityCheck},
 		{StageVoice, p.runVoice},
@@ -303,11 +322,11 @@ func (p *Pipeline) runPlanning(ctx context.Context, req *PipelineRequest) (*Stag
 		To:      "director",
 		SkillID: "plan_pipeline",
 		Payload: map[string]any{
-			"analysis":  req.Analysis,
-			"budget":    req.Budget,
-			"quality":   req.QualityLevel,
+			"analysis": req.Analysis,
+			"budget":   req.Budget,
+			"quality":  req.QualityLevel,
 		},
-	}, 30*time.Second)
+	}, 120*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline planning: %w", err)
 	}
@@ -350,38 +369,224 @@ func (p *Pipeline) runLocations(ctx context.Context, req *PipelineRequest) (*Sta
 	return &StageResult{Summary: "Locations designed", Data: resp.Output}, nil
 }
 
-func (p *Pipeline) runStoryboard(ctx context.Context, req *PipelineRequest) (*StageResult, error) {
+func (p *Pipeline) runSegmentation(ctx context.Context, req *PipelineRequest) (*StageResult, error) {
+	// Extract characters info từ req.Characters["characters"] (string JSON)
+	charsJSON, _ := req.Characters["characters"].(string)
+	locsJSON, _ := req.Locations["locations"].(string)
+
 	resp, err := p.bus.Request(ctx, agent.Message{
-		To:      "storyboard",
-		SkillID: "create_storyboard",
+		To:      "director",
+		SkillID: "segment_clips",
 		Payload: map[string]any{
-			"story":      req.Story,
-			"analysis":   req.Analysis,
-			"characters": req.Characters,
-			"locations":  req.Locations,
+			"input":                  req.Story,
+			"charactersLibName":      "characters",
+			"locationsLibName":       "locations",
+			"charactersIntroduction": charsJSON,
 		},
 	}, 120*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("storyboard creation: %w", err)
+		return nil, fmt.Errorf("segmentation: %w", err)
 	}
 
-	req.Storyboard = resp.Output
-	return &StageResult{Summary: "Storyboard created", Data: resp.Output}, nil
+	// Parse clips từ resp.Output["clips"] (string JSON)
+	clipsRaw, _ := resp.Output["clips"].(string)
+	clipsRaw = stripCodeFences(clipsRaw)
+
+	var clips []ClipData
+	if err := json.Unmarshal([]byte(clipsRaw), &clips); err != nil {
+		// Fallback: tạo 1 clip duy nhất từ toàn bộ story
+		p.logger.Warn("clip parse failed, using single clip fallback", "error", err)
+		clips = []ClipData{{ID: "clip-1", Title: "Full Story", Content: req.Story, Order: 1}}
+	}
+
+	// Đảm bảo mỗi clip có ID
+	for i := range clips {
+		if clips[i].ID == "" {
+			clips[i].ID = fmt.Sprintf("clip-%d", i+1)
+		}
+		clips[i].Order = i + 1
+	}
+
+	req.Clips = clips
+	_ = locsJSON // available for future use
+
+	return &StageResult{
+		Summary: fmt.Sprintf("Story segmented into %d clips", len(clips)),
+		Data: map[string]any{
+			"clips":     clips,
+			"clipCount": len(clips),
+		},
+	}, nil
+}
+
+func (p *Pipeline) runScreenplays(ctx context.Context, req *PipelineRequest) (*StageResult, error) {
+	if len(req.Clips) == 0 {
+		// Fallback nếu segmentation không có clips
+		req.Screenplays = []ScreenplayData{{ClipID: "clip-1", Title: "Full Story", Screenplay: req.Story}}
+		return &StageResult{Summary: "Screenplay fallback (no clips)", Data: map[string]any{"count": 1}}, nil
+	}
+
+	charsJSON, _ := req.Characters["characters"].(string)
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	screenplays := make([]ScreenplayData, len(req.Clips))
+
+	for i, clip := range req.Clips {
+		wg.Add(1)
+		go func(idx int, c ClipData) {
+			defer wg.Done()
+			resp, err := p.bus.Request(ctx, agent.Message{
+				To:      "director",
+				SkillID: "convert_screenplay",
+				Payload: map[string]any{
+					"clipId":                 c.ID,
+					"clipContent":            c.Content,
+					"charactersLibName":      "characters",
+					"locationsLibName":       "locations",
+					"charactersIntroduction": charsJSON,
+				},
+			}, 120*time.Second)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				p.logger.Error("screenplay conversion failed", "clipId", c.ID, "error", err)
+				screenplays[idx] = ScreenplayData{ClipID: c.ID, Title: c.Title, Screenplay: c.Content}
+				return
+			}
+			sp, _ := resp.Output["screenplay"].(string)
+			screenplays[idx] = ScreenplayData{ClipID: c.ID, Title: c.Title, Screenplay: sp}
+		}(i, clip)
+	}
+	wg.Wait()
+
+	req.Screenplays = screenplays
+	return &StageResult{
+		Summary: fmt.Sprintf("Converted %d screenplays", len(screenplays)),
+		Data: map[string]any{
+			"screenplays": screenplays,
+			"count":       len(screenplays),
+		},
+	}, nil
+}
+
+func (p *Pipeline) runStoryboards(ctx context.Context, req *PipelineRequest) (*StageResult, error) {
+	// Extract characters và locations đúng field names mà storyboard agent cần
+	charsJSON, _ := req.Characters["characters"].(string)
+	charsJSON = stripCodeFences(charsJSON)
+	locsJSON, _ := req.Locations["locations"].(string)
+	locsJSON = stripCodeFences(locsJSON)
+
+	screenplays := req.Screenplays
+	if len(screenplays) == 0 {
+		// Fallback nếu không có screenplays
+		screenplays = []ScreenplayData{{ClipID: "clip-1", Title: "Full Story", Screenplay: req.Story}}
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	storyboards := make([]map[string]any, len(screenplays))
+
+	for i, sp := range screenplays {
+		wg.Add(1)
+		go func(idx int, screenplay ScreenplayData) {
+			defer wg.Done()
+
+			// Tìm clip tương ứng để lấy title
+			clipTitle := screenplay.Title
+			for _, c := range req.Clips {
+				if c.ID == screenplay.ClipID {
+					clipTitle = c.Title
+					break
+				}
+			}
+
+			resp, err := p.bus.Request(ctx, agent.Message{
+				To:      "storyboard",
+				SkillID: "create_storyboard",
+				Payload: map[string]any{
+					// Fields mà storyboard agent thực sự đọc:
+					"clipJson":                  fmt.Sprintf(`{"clipId":"%s","title":"%s"}`, screenplay.ClipID, clipTitle),
+					"clipContent":               screenplay.Screenplay,
+					"charactersLibName":         "characters",
+					"locationsLibName":          "locations",
+					"charactersIntroduction":    charsJSON,
+					"charactersAppearanceList":  charsJSON,
+					"charactersFullDescription": charsJSON,
+					"charactersInfo":            charsJSON,
+					"charactersAgeGender":       charsJSON,
+					"locationsDescription":      locsJSON,
+					"panelCount":                float64(9),
+				},
+			}, 180*time.Second)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				p.logger.Error("storyboard creation failed", "clipId", screenplay.ClipID, "error", err)
+				storyboards[idx] = map[string]any{
+					"clipId": screenplay.ClipID,
+					"title":  clipTitle,
+					"error":  err.Error(),
+					"panels": []any{},
+				}
+				return
+			}
+
+			out := resp.Output
+			if out == nil {
+				out = map[string]any{}
+			}
+			out["clipId"] = screenplay.ClipID
+			out["title"] = clipTitle
+			storyboards[idx] = out
+		}(i, sp)
+	}
+	wg.Wait()
+
+	req.Storyboards = storyboards
+	// Gộp tất cả panels thành 1 storyboard flat cho backward compat
+	req.Storyboard = map[string]any{
+		"storyboards": storyboards,
+		"clipCount":   len(storyboards),
+	}
+
+	totalPanels := 0
+	for _, sb := range storyboards {
+		if panels, ok := sb["panels"].([]any); ok {
+			totalPanels += len(panels)
+		}
+	}
+
+	return &StageResult{
+		Summary: fmt.Sprintf("Created %d storyboards, %d total panels", len(storyboards), totalPanels),
+		Data: map[string]any{
+			"storyboards": storyboards,
+			"clipCount":   len(storyboards),
+			"panelCount":  totalPanels,
+		},
+	}, nil
 }
 
 func (p *Pipeline) runMediaGeneration(ctx context.Context, req *PipelineRequest) (*StageResult, error) {
-	// Build effective storyboard — if LLM failed to produce JSON panels, generate fallback panels from story
-	storyboard := req.Storyboard
-	if !hasPanels(storyboard) {
-		p.logger.Warn("storyboard has no parsed panels, generating fallback panels from story")
-		storyboard = p.generateFallbackPanels(req.Story)
+	// Build combined storyboard từ nhiều storyboards
+	combinedPanels := []any{}
+	for _, sb := range req.Storyboards {
+		if panels, ok := sb["panels"].([]any); ok {
+			combinedPanels = append(combinedPanels, panels...)
+		}
+	}
+	effectiveStoryboard := map[string]any{"panels": combinedPanels}
+	if len(combinedPanels) == 0 {
+		effectiveStoryboard = p.generateFallbackPanels(req.Story)
 	}
 
 	resp, err := p.bus.Request(ctx, agent.Message{
 		To:      "media",
 		SkillID: "generate_batch",
 		Payload: map[string]any{
-			"storyboard": storyboard,
+			"storyboard": effectiveStoryboard,
 			"characters": req.Characters,
 			"locations":  req.Locations,
 		},
@@ -466,9 +671,10 @@ func (p *Pipeline) emit(event ProgressEvent) {
 type PipelineRequest struct {
 	ProjectID    string `json:"projectId"`
 	Story        string `json:"story"`
-	InputType    string `json:"inputType"` // novel, script, outline
-	Budget       string `json:"budget"`    // low, medium, high
+	InputType    string `json:"inputType"`    // novel, script, outline
+	Budget       string `json:"budget"`       // low, medium, high
 	QualityLevel string `json:"qualityLevel"` // draft, standard, premium
+	Mode         string `json:"mode"`         // autopilot, step_by_step
 
 	// Intermediate data populated during pipeline execution
 	Analysis   map[string]any `json:"-"`
@@ -478,6 +684,11 @@ type PipelineRequest struct {
 	Storyboard map[string]any `json:"-"`
 	Media      map[string]any `json:"-"`
 	Voices     map[string]any `json:"-"`
+
+	// New fields for segmentation/screenplay/storyboards flow
+	Clips       []ClipData       `json:"-"` // Populated by runSegmentation
+	Screenplays []ScreenplayData `json:"-"` // Populated by runScreenplays
+	Storyboards []map[string]any `json:"-"` // Populated by runStoryboards (một per clip)
 }
 
 // PipelineResult is the output of a pipeline run.
@@ -559,6 +770,21 @@ func splitIntoScenes(text string, maxScenes int) []string {
 	return scenes
 }
 
+// stripCodeFences removes markdown code fence wrappers (```json ... ```) from a string.
+func stripCodeFences(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		// Remove first line (```json or ```)
+		if idx := strings.Index(s, "\n"); idx != -1 {
+			s = s[idx+1:]
+		}
+	}
+	if strings.HasSuffix(s, "```") {
+		s = s[:strings.LastIndex(s, "```")]
+	}
+	return strings.TrimSpace(s)
+}
+
 // buildStageInput returns the input payload for a given stage based on the
 // current pipeline request state. Called just before each stage executes so
 // that upstream results populated into req are included.
@@ -572,8 +798,12 @@ func buildStageInput(stage Stage, req *PipelineRequest) map[string]any {
 		return map[string]any{"story": req.Story, "analysis": req.Analysis}
 	case StageLocations:
 		return map[string]any{"story": req.Story, "analysis": req.Analysis}
+	case StageSegmentation:
+		return map[string]any{"story": req.Story, "characters": req.Characters, "locations": req.Locations}
+	case StageScreenplay:
+		return map[string]any{"clips": req.Clips, "characters": req.Characters}
 	case StageStoryboard:
-		return map[string]any{"story": req.Story, "analysis": req.Analysis, "characters": req.Characters, "locations": req.Locations}
+		return map[string]any{"screenplays": req.Screenplays, "characters": req.Characters, "locations": req.Locations}
 	case StageMediaGen:
 		return map[string]any{"storyboard": req.Storyboard, "characters": req.Characters, "locations": req.Locations}
 	case StageQualityCheck:
@@ -591,12 +821,20 @@ func ptrTime(t time.Time) *time.Time { return &t }
 
 // stageIndexMap maps stage names to their index in the pipeline.
 var stageIndexMap = map[Stage]int{
-	StageAnalysis: 0, StagePlanning: 1, StageCharacters: 2,
-	StageLocations: 3, StageStoryboard: 4, StageMediaGen: 5,
-	StageQualityCheck: 6, StageVoice: 7, StageAssembly: 8,
+	StageAnalysis:     0,
+	StagePlanning:     1,
+	StageCharacters:   2,
+	StageLocations:    3,
+	StageSegmentation: 4,
+	StageScreenplay:   5,
+	StageStoryboard:   6,
+	StageMediaGen:     7,
+	StageQualityCheck: 8,
+	StageVoice:        9,
+	StageAssembly:     10,
 }
 
-// stageRunners maps each stage to its run function.
+// stageRunner maps each stage to its run function.
 // Characters and Locations only run individually on retry (not parallel).
 func (p *Pipeline) stageRunner(stage Stage) func(context.Context, *PipelineRequest) (*StageResult, error) {
 	switch stage {
@@ -608,8 +846,12 @@ func (p *Pipeline) stageRunner(stage Stage) func(context.Context, *PipelineReque
 		return p.runCharacters
 	case StageLocations:
 		return p.runLocations
+	case StageSegmentation:
+		return p.runSegmentation
+	case StageScreenplay:
+		return p.runScreenplays
 	case StageStoryboard:
-		return p.runStoryboard
+		return p.runStoryboards
 	case StageMediaGen:
 		return p.runMediaGeneration
 	case StageQualityCheck:
@@ -636,7 +878,7 @@ func (p *Pipeline) RetryStage(ctx context.Context, projectID string, stage Stage
 	}
 
 	stageIdx := stageIndexMap[stage]
-	totalStages := 9
+	totalStages := 11
 
 	// Load stored input from DB
 	storedInput, err := p.checkpoint.GetStageInput(ctx, projectID, stage)

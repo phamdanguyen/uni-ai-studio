@@ -45,6 +45,12 @@ type ModelRouter interface {
 	// CallWithJSON makes an LLM request expecting structured JSON output.
 	CallWithJSON(ctx context.Context, tier ModelTier, systemPrompt, userPrompt string, schema any) (*LLMResponse, error)
 
+	// CallForAgent makes an LLM request with agent-specific model override.
+	CallForAgent(ctx context.Context, agentName string, tier ModelTier, systemPrompt, userPrompt string) (*LLMResponse, error)
+
+	// CallWithJSONForAgent is like CallWithJSON but with agent-specific override.
+	CallWithJSONForAgent(ctx context.Context, agentName string, tier ModelTier, systemPrompt, userPrompt string, schema any) (*LLMResponse, error)
+
 	// CheckBudget verifies the project hasn't exceeded its token budget.
 	CheckBudget(ctx context.Context, projectID string) error
 
@@ -54,10 +60,10 @@ type ModelRouter interface {
 
 // LLMResponse is the unified response from any LLM provider.
 type LLMResponse struct {
-	Content   string     `json:"content"`
-	Model     string     `json:"model"`
-	Usage     TokenUsage `json:"usage"`
-	StopReason string   `json:"stopReason,omitempty"`
+	Content    string     `json:"content"`
+	Model      string     `json:"model"`
+	Usage      TokenUsage `json:"usage"`
+	StopReason string     `json:"stopReason,omitempty"`
 }
 
 // --- Tool Registry ---

@@ -29,6 +29,9 @@ type Router struct {
 	// Token budget tracking (per-project)
 	mu      sync.RWMutex
 	budgets map[string]*Budget
+
+	// Per-agent model overrides: agentName -> tier -> model
+	agentModels map[string]map[agent.ModelTier]string
 }
 
 // Budget tracks per-project token spending.
@@ -60,10 +63,11 @@ func NewRouter(cfg config.LLMConfig, logger *slog.Logger) *Router {
 		httpClient: &http.Client{
 			Timeout: time.Duration(cfg.RequestTimeoutS) * time.Second,
 		},
-		logger:  logger.With("component", "llm-router"),
-		budgets: make(map[string]*Budget),
-		circuit: NewCircuitBreaker(5, 30*time.Second, logger),
-		rateCh:  rateCh,
+		logger:      logger.With("component", "llm-router"),
+		budgets:     make(map[string]*Budget),
+		circuit:     NewCircuitBreaker(5, 30*time.Second, logger),
+		rateCh:      rateCh,
+		agentModels: make(map[string]map[agent.ModelTier]string),
 	}
 }
 
@@ -284,6 +288,245 @@ func (r *Router) SetBudget(projectID string, limitUSD float64) {
 	budget.LimitUSD = limitUSD
 }
 
+// CallForAgent makes an LLM request using agent-specific model override if set,
+// otherwise falls back to the global model for the given tier.
+func (r *Router) CallForAgent(ctx context.Context, agentName string, tier agent.ModelTier, systemPrompt, userPrompt string) (*agent.LLMResponse, error) {
+	model := r.selectModelForAgent(agentName, tier)
+
+	reqBody := openRouterRequest{
+		Model:       model,
+		Messages:    r.buildMessages(model, systemPrompt, userPrompt),
+		Temperature: tierTemperature(tier),
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		r.cfg.OpenRouterBaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+r.cfg.OpenRouterAPIKey)
+	req.Header.Set("HTTP-Referer", "https://uni-ai.studio")
+	req.Header.Set("X-Title", "Uni AI Studio")
+
+	if err := r.waitForToken(ctx); err != nil {
+		return nil, err
+	}
+
+	if !r.circuit.Allow() {
+		return nil, fmt.Errorf("LLM circuit breaker open: provider temporarily unavailable")
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("LLM API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var orResp openRouterResponse
+	if err := json.Unmarshal(respBody, &orResp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if len(orResp.Choices) == 0 {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("empty response from model %s", model)
+	}
+
+	r.circuit.RecordSuccess()
+	return &agent.LLMResponse{
+		Content: orResp.Choices[0].Message.Content,
+		Model:   orResp.Model,
+		Usage: agent.TokenUsage{
+			InputTokens:  orResp.Usage.PromptTokens,
+			OutputTokens: orResp.Usage.CompletionTokens,
+			TotalTokens:  orResp.Usage.TotalTokens,
+			CostUSD:      orResp.Usage.Cost,
+			Model:        orResp.Model,
+			Tier:         string(tier),
+		},
+		StopReason: orResp.Choices[0].FinishReason,
+	}, nil
+}
+
+// CallWithJSONForAgent is like CallWithJSON but with agent-specific model override.
+func (r *Router) CallWithJSONForAgent(ctx context.Context, agentName string, tier agent.ModelTier, systemPrompt, userPrompt string, _ any) (*agent.LLMResponse, error) {
+	model := r.selectModelForAgent(agentName, tier)
+	enhancedSystem := systemPrompt + "\n\nYou MUST respond with valid JSON only. No markdown, no explanation."
+
+	reqBody := openRouterRequest{
+		Model:       model,
+		Messages:    r.buildMessages(model, enhancedSystem, userPrompt),
+		Temperature: tierTemperature(tier),
+	}
+	if !isGemmaModel(model) {
+		reqBody.ResponseFormat = &openRouterResponseFormat{Type: "json_object"}
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		r.cfg.OpenRouterBaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+r.cfg.OpenRouterAPIKey)
+	req.Header.Set("HTTP-Referer", "https://uni-ai.studio")
+	req.Header.Set("X-Title", "Uni AI Studio")
+
+	if err := r.waitForToken(ctx); err != nil {
+		return nil, err
+	}
+
+	if !r.circuit.Allow() {
+		return nil, fmt.Errorf("LLM circuit breaker open: provider temporarily unavailable")
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("LLM API error (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var orResp openRouterResponse
+	if err := json.Unmarshal(respBody, &orResp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if len(orResp.Choices) == 0 {
+		r.circuit.RecordFailure()
+		return nil, fmt.Errorf("empty response from model %s", model)
+	}
+
+	r.circuit.RecordSuccess()
+	return &agent.LLMResponse{
+		Content: orResp.Choices[0].Message.Content,
+		Model:   orResp.Model,
+		Usage: agent.TokenUsage{
+			InputTokens:  orResp.Usage.PromptTokens,
+			OutputTokens: orResp.Usage.CompletionTokens,
+			TotalTokens:  orResp.Usage.TotalTokens,
+			CostUSD:      orResp.Usage.Cost,
+			Model:        orResp.Model,
+			Tier:         string(tier),
+		},
+		StopReason: orResp.Choices[0].FinishReason,
+	}, nil
+}
+// SetAgentModel sets a model override for a specific agent and tier.
+func (r *Router) SetAgentModel(agentName string, tier agent.ModelTier, model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.agentModels[agentName]; !exists {
+		r.agentModels[agentName] = make(map[agent.ModelTier]string)
+	}
+	r.agentModels[agentName][tier] = model
+	r.logger.Info("agent model override set", "agent", agentName, "tier", tier, "model", model)
+}
+
+// GetAgentModels returns the model overrides for a specific agent as tier(string) -> model.
+func (r *Router) GetAgentModels(agentName string) map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	overrides, exists := r.agentModels[agentName]
+	if !exists {
+		return map[string]string{}
+	}
+	result := make(map[string]string, len(overrides))
+	for tier, model := range overrides {
+		result[string(tier)] = model
+	}
+	return result
+}
+
+// GetAllAgentModels returns all per-agent overrides as agentName -> tier(string) -> model.
+func (r *Router) GetAllAgentModels() map[string]map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make(map[string]map[string]string, len(r.agentModels))
+	for agentName, tiers := range r.agentModels {
+		tierMap := make(map[string]string, len(tiers))
+		for tier, model := range tiers {
+			tierMap[string(tier)] = model
+		}
+		result[agentName] = tierMap
+	}
+	return result
+}
+
+// ClearAgentModel removes the override for a specific agent+tier.
+func (r *Router) ClearAgentModel(agentName string, tier agent.ModelTier) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if overrides, exists := r.agentModels[agentName]; exists {
+		delete(overrides, tier)
+		if len(overrides) == 0 {
+			delete(r.agentModels, agentName)
+		}
+	}
+}
+
+// selectModelForAgent picks model for given tier, checking agent override first.
+func (r *Router) selectModelForAgent(agentName string, tier agent.ModelTier) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if overrides, exists := r.agentModels[agentName]; exists {
+		if model, ok := overrides[tier]; ok && model != "" {
+			return model
+		}
+	}
+	switch tier {
+	case agent.TierFlash:
+		return r.cfg.FlashModel
+	case agent.TierStandard:
+		return r.cfg.StandardModel
+	case agent.TierPremium:
+		return r.cfg.PremiumModel
+	default:
+		return r.cfg.StandardModel
+	}
+}
+
 // LLMSettingsJSON is the JSON representation of LLM settings for the API.
 type LLMSettingsJSON struct {
 	OpenRouterApiKey  string  `json:"openRouterApiKey"`
@@ -296,6 +539,58 @@ type LLMSettingsJSON struct {
 	DefaultBudgetUsd  float64 `json:"defaultBudgetUsd"`
 	RequestTimeoutS   int     `json:"requestTimeoutS"`
 }
+
+// AgentModelConfig holds per-agent model overrides for a single agent.
+type AgentModelConfig struct {
+	Flash    string `json:"flash"`
+	Standard string `json:"standard"`
+	Premium  string `json:"premium"`
+}
+
+// AgentModelsJSON is the JSON representation for per-agent model settings API.
+type AgentModelsJSON struct {
+	Agents map[string]AgentModelConfig `json:"agents"`
+}
+
+// GetAgentModelsConfig returns per-agent model overrides for API response.
+func (r *Router) GetAgentModelsConfig() AgentModelsJSON {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	agents := make(map[string]AgentModelConfig, len(r.agentModels))
+	for agentName, tiers := range r.agentModels {
+		agents[agentName] = AgentModelConfig{
+			Flash:    tiers[agent.TierFlash],
+			Standard: tiers[agent.TierStandard],
+			Premium:  tiers[agent.TierPremium],
+		}
+	}
+	return AgentModelsJSON{Agents: agents}
+}
+
+// UpdateAgentModelsConfig updates per-agent model overrides from API request.
+func (r *Router) UpdateAgentModelsConfig(update AgentModelsJSON) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for agentName, agentCfg := range update.Agents {
+		if _, exists := r.agentModels[agentName]; !exists {
+			r.agentModels[agentName] = make(map[agent.ModelTier]string)
+		}
+		tiers := r.agentModels[agentName]
+		if agentCfg.Flash != "" {
+			tiers[agent.TierFlash] = agentCfg.Flash
+		}
+		if agentCfg.Standard != "" {
+			tiers[agent.TierStandard] = agentCfg.Standard
+		}
+		if agentCfg.Premium != "" {
+			tiers[agent.TierPremium] = agentCfg.Premium
+		}
+		r.logger.Info("agent model config updated", "agent", agentName)
+	}
+}
+
 
 // maskKey returns a masked version of an API key for safe display.
 func maskKey(key string) string {
