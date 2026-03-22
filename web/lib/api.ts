@@ -1,3 +1,5 @@
+import { getToken } from './keycloak';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8082';
 
 export interface AgentCard {
@@ -93,9 +95,18 @@ export type AgentModelsConfig = {
 };
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...init?.headers as Record<string, string>,
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers,
   });
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
@@ -172,11 +183,17 @@ export const api = {
   agentModels: {
     get: (): Promise<AgentModelsConfig> =>
       fetchJSON<AgentModelsConfig>('/settings/agents'),
-    update: (config: AgentModelsConfig): Promise<void> =>
-      fetch(`${API_BASE}/settings/agents`, {
+    update: (config: AgentModelsConfig): Promise<void> => {
+      const token = getToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      return fetch(`${API_BASE}/settings/agents`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(config),
-      }).then(r => { if (!r.ok) throw new Error('Failed to update'); }),
+      }).then(r => { if (!r.ok) throw new Error('Failed to update'); });
+    },
   },
 };

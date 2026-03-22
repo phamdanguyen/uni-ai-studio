@@ -1,3 +1,5 @@
+import { getToken } from './keycloak';
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8082';
 
 export interface PipelineEvent {
@@ -16,7 +18,11 @@ export function connectPipelineSSE(
   onEvent: (event: PipelineEvent) => void,
   onError?: (error: Event) => void
 ): EventSource {
-  const url = `${API_BASE}/pipeline/progress/${projectId}`;
+  // EventSource does not support custom headers,
+  // so we pass the JWT token via query param.
+  const token = getToken();
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+  const url = `${API_BASE}/pipeline/progress/${projectId}${tokenParam}`;
   const source = new EventSource(url);
 
   source.onmessage = (e) => {

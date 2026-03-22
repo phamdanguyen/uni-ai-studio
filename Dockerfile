@@ -1,33 +1,40 @@
+# ========== Builder ==========
 FROM golang:1.25-alpine AS builder
+
+RUN apk add --no-cache git
 
 WORKDIR /app
 
-# Install necessary build tools
-RUN apk add --no-cache gcc musl-dev
-
-# Download dependencies
+# Cache Go modules
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the source code
+# Copy source
 COPY . .
 
-# Build the server binary
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o waoo-server ./cmd/server
+# Build static binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o bin/waoo-server ./cmd/server
 
-# Final lightweight stage
-FROM alpine:latest
+# ========== Runtime ==========
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates wget tzdata
 
 WORKDIR /app
 
-# Install dependencies required for runtime (like timezone data, ca-certificates, etc.)
-RUN apk --no-cache add ca-certificates tzdata
+# Copy binary
+COPY --from=builder /app/bin/waoo-server ./bin/waoo-server
 
-# Copy binary from builder
-COPY --from=builder /app/waoo-server .
-COPY --from=builder /app/.env .
+# Copy prompts — runtime.Caller(0) resolves to /app/lib/prompts/loader.go at compile time
+# so prompt files must exist at /app/lib/prompts/ in runtime container
+COPY --from=builder /app/lib/prompts/ ./lib/prompts/
 
-# Expose port (adjust if necessary)
+# Copy migrations for DB init
+COPY --from=builder /app/migrations/ ./migrations/
+
 EXPOSE 8080
 
-CMD ["./waoo-server"]
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD wget -qO- http://localhost:8080/health || exit 1
+
+CMD ["./bin/waoo-server"]

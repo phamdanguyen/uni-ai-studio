@@ -17,6 +17,13 @@ type Config struct {
 	Storage  StorageConfig
 	LLM      LLMConfig
 	Media    MediaConfig
+	Keycloak KeycloakConfig
+}
+
+// KeycloakConfig holds Keycloak OIDC settings.
+type KeycloakConfig struct {
+	URL   string
+	Realm string
 }
 
 // MediaConfig holds API keys for media generation providers.
@@ -155,6 +162,10 @@ func Load() Config {
 			ViduKey:    envStr("VIDU_KEY", ""),
 			MiniMaxKey: envStr("MINIMAX_KEY", ""),
 			QwenKey:    envStr("QWEN_KEY", ""),
+		},
+		Keycloak: KeycloakConfig{
+			URL:   envStr("KEYCLOAK_URL", "http://localhost:8180"),
+			Realm: envStr("KEYCLOAK_REALM", "waoo-studio"),
 		},
 	}
 }

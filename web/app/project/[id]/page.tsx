@@ -971,7 +971,7 @@ function StageDetailPanel({
     try { parsed = JSON.parse(editInputText); } catch { /* keep string */ }
     fetch(`${PAGE_API_BASE}/pipeline/${projectId}/stage/${stageKey}/input`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${getToken()}` },
       body: JSON.stringify(parsed),
     })
       .catch(() => {})
@@ -988,7 +988,7 @@ function StageDetailPanel({
     setActionLoading("retry");
     fetch(`${PAGE_API_BASE}/pipeline/${projectId}/retry/${stageKey}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${getToken()}` },
       body: JSON.stringify(savedInput ?? {}),
     })
       .catch(() => {})
@@ -1347,7 +1347,7 @@ export default function ProjectPage() {
   const loadStages = useCallback(() => {
     // Use PAGE_API_BASE (8082) directly via fetch since api.ts uses 8080
     fetch(`${PAGE_API_BASE}/pipeline/${projectId}`, {
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${getToken()}` },
     })
       .then(r => r.ok ? r.json() : Promise.reject(r))
       .then((data: { stages?: StageInfo[] }) => {

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Sidebar from "./sidebar";
+import { AuthProvider } from "./providers";
 
 export const metadata: Metadata = {
   title: "Uni AI Studio — AI Filmmaking",
@@ -17,12 +18,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className="antialiased">
-        <div style={{ display: "flex", minHeight: "100vh" }}>
-          <Sidebar />
-          <main className="main-content" style={{ flex: 1 }}>
-            {children}
-          </main>
-        </div>
+        <AuthProvider>
+          <div style={{ display: "flex", minHeight: "100vh" }}>
+            <Sidebar />
+            <main className="main-content" style={{ flex: 1 }}>
+              {children}
+            </main>
+          </div>
+        </AuthProvider>
       </body>
     </html>
   );
