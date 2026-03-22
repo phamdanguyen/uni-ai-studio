@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { connectPipelineSSE, type PipelineEvent } from "@/lib/sse";
+import { getToken } from "@/lib/keycloak";
 import { api, type StageInfo, type RunState } from "@/lib/api";
 
 // Override API base for this page (server runs at 8082)
