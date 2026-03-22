@@ -55,7 +55,7 @@ CREATE INDEX idx_async_tasks_project ON async_tasks (project_id);
 CREATE TABLE IF NOT EXISTS workflow_events (
     id          TEXT PRIMARY KEY,
     event_type  TEXT NOT NULL,
-    run_id      TEXT NOT NULL REFERENCES workflow_runs(id),
+    run_id      UUID NOT NULL REFERENCES workflow_runs(id),
     step_key    TEXT,
     project_id  TEXT NOT NULL,
     data        JSONB,

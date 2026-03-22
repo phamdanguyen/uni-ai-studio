@@ -1,5 +1,11 @@
 .PHONY: dev build test lint clean infra infra-down migrate
 
+# Load .env if present
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
+
 # --- Development ---
 
 dev: ## Run the server in development mode
@@ -37,7 +43,7 @@ migrate: ## Apply database migrations
 	@echo "Applying migrations..."
 	@for f in migrations/*.sql; do \
 		echo "  $$f"; \
-		PGPASSWORD=waoo_secret psql -h localhost -U waoo -d waoo_studio -f "$$f"; \
+		docker exec -i waoo-postgres psql -U waoo -d waoo_studio < "$$f"; \
 	done
 
 # --- Go tools ---

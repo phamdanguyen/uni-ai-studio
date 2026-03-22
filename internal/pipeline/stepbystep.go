@@ -396,3 +396,33 @@ func (p *StepByStepPipeline) emit(event ProgressEvent) {
 		l(event)
 	}
 }
+
+// RetryStage re-runs a specific stage in step-by-step mode.
+// It delegates to inner Pipeline.RetryStage and updates run state accordingly.
+func (p *StepByStepPipeline) RetryStage(ctx context.Context, projectID string, stage Stage, inputOverride map[string]any) error {
+	if p.checkpoint == nil {
+		return fmt.Errorf("checkpoint store not available")
+	}
+
+	// Reset run state to point at the retried stage (without overwriting story metadata)
+	_ = p.checkpoint.UpdateRunStageStatus(ctx, projectID, stage, StepStatusRunning, "")
+
+	err := p.inner.RetryStage(ctx, projectID, stage, inputOverride)
+	if err != nil {
+		_ = p.checkpoint.UpdateRunStageStatus(ctx, projectID, stage, StepStatusFailed, err.Error())
+		return err
+	}
+
+	// After retry success, set awaiting_approval again
+	_ = p.checkpoint.UpdateRunStageStatus(ctx, projectID, stage, StepStatusAwaitingApproval, "")
+	p.emit(ProgressEvent{
+		ProjectID:   projectID,
+		Stage:       stage,
+		StageIndex:  stageIndexOf(stage),
+		TotalStages: len(stageOrder),
+		Status:      "awaiting_approval",
+		Message:     fmt.Sprintf("Retry of %s complete — review and approve to continue", stage),
+		Timestamp:   time.Now(),
+	})
+	return nil
+}

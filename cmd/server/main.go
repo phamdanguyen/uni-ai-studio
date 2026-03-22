@@ -495,7 +495,7 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
 	})
 
-	// POST /pipeline/{id}/retry/{stage} — re-run a single stage with optional input override (step-by-step mode)
+	// POST /pipeline/{id}/retry/{stage} — re-run a single stage with optional input override
 	mux.HandleFunc("POST /pipeline/{id}/retry/{stage}", func(w http.ResponseWriter, r *http.Request) {
 		if checkpointStore == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "database not available"})
@@ -510,18 +510,17 @@ func main() {
 				return
 			}
 		}
-		// Ghi đè input nếu có
-		if inputOverride != nil {
-			if err := checkpointStore.UpdateStageInput(r.Context(), projectID, pipeline.Stage(stage), inputOverride); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
+
+		go func() {
+			if err := stepByStepPipeline.RetryStage(context.Background(), projectID, pipeline.Stage(stage), inputOverride); err != nil {
+				logger.Error("retry stage failed", "projectId", projectID, "stage", stage, "error", err)
 			}
-		}
+		}()
+
 		writeJSON(w, http.StatusAccepted, map[string]any{
-			"status":    "input_updated",
+			"status":    "retrying",
 			"projectId": projectID,
 			"stage":     stage,
-			"message":   "Call POST /pipeline/{id}/next to re-run from this stage",
 		})
 	})
 

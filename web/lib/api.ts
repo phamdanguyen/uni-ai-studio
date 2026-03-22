@@ -37,6 +37,15 @@ export interface PipelineRequest {
   inputType: string;
   budget: string;
   qualityLevel: string;
+  mode?: 'autopilot' | 'step_by_step';
+}
+
+export interface RunState {
+  projectId: string;
+  mode: 'autopilot' | 'step_by_step';
+  currentStage: string;
+  currentStatus: string;
+  error?: string;
 }
 
 export interface LLMSettings {
@@ -137,6 +146,13 @@ export const api = {
       fetchJSON<{ status: string; url: string }>(`/pipeline/${projectId}/stage/${stage}/media`, {
         method: 'POST',
         body: JSON.stringify({ url, label, mimeType }),
+      }),
+    getRunState: (projectId: string) =>
+      fetchJSON<RunState>(`/pipeline/${projectId}/steps/run-state`),
+    nextStep: (projectId: string) =>
+      fetchJSON<{ status: string; projectId: string; message: string }>(`/pipeline/${projectId}/steps/next`, {
+        method: 'POST',
+        body: JSON.stringify({}),
       }),
   },
 

@@ -297,6 +297,15 @@ func (cs *CheckpointStore) MarkRunFailed(ctx context.Context, projectID, errMsg 
 	return err
 }
 
+// UpdateRunStageStatus updates only the current stage and status without touching story metadata.
+func (cs *CheckpointStore) UpdateRunStageStatus(ctx context.Context, projectID string, stage Stage, status StepStatus, errMsg string) error {
+	_, err := cs.pool.Exec(ctx, `
+		UPDATE pipeline_runs
+		SET current_stage = $2, current_status = $3, error = $4, updated_at = NOW()
+		WHERE project_id = $1`, projectID, string(stage), string(status), errMsg)
+	return err
+}
+
 // GetRunState retrieves the current run state for a project.
 func (cs *CheckpointStore) GetRunState(ctx context.Context, projectID string) (*RunState, error) {
 	var mode, stage, status, errMsg string

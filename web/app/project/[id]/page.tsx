@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { connectPipelineSSE, type PipelineEvent } from "@/lib/sse";
-import { api, type StageInfo } from "@/lib/api";
+import { api, type StageInfo, type RunState } from "@/lib/api";
 
 // Override API base for this page (server runs at 8082)
 const PAGE_API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8082";
@@ -51,7 +51,7 @@ const STAGE_CONFIG: Record<string, StageConfig> = {
   assembly:      { agent: "—",           skill: "—",                  promptFile: "—",                          tools: [],               notes: "Ghép toàn bộ: media + voice + storyboard thành output cuối" },
 };
 
-type StageStatus = "pending" | "running" | "completed" | "failed";
+type StageStatus = "pending" | "running" | "completed" | "failed" | "awaiting_approval";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt(iso?: string) {
@@ -147,10 +147,11 @@ function JsonNode({ data, depth = 0 }: { data: unknown; depth?: number }) {
 // ─── Status Badge ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: StageStatus | string }) {
   const cfg: Record<string, { color: string; bg: string; label: string }> = {
-    pending:   { color: "#6b7280", bg: "rgba(107,114,128,0.15)", label: "PENDING" },
-    running:   { color: "#60a5fa", bg: "rgba(96,165,250,0.15)",  label: "RUNNING" },
-    completed: { color: "#34d399", bg: "rgba(52,211,153,0.15)",  label: "DONE"    },
-    failed:    { color: "#f87171", bg: "rgba(248,113,113,0.15)", label: "FAILED"  },
+    pending:            { color: "#6b7280", bg: "rgba(107,114,128,0.15)", label: "PENDING" },
+    running:            { color: "#60a5fa", bg: "rgba(96,165,250,0.15)",  label: "RUNNING" },
+    completed:          { color: "#34d399", bg: "rgba(52,211,153,0.15)",  label: "DONE"    },
+    failed:             { color: "#f87171", bg: "rgba(248,113,113,0.15)", label: "FAILED"  },
+    awaiting_approval:  { color: "#fbbf24", bg: "rgba(251,191,36,0.15)", label: "AWAITING" },
   };
   const c = cfg[status] ?? cfg.pending;
   return (
@@ -166,17 +167,18 @@ function StatusBadge({ status }: { status: StageStatus | string }) {
 // ─── Status Dot ───────────────────────────────────────────────────────────────
 function StatusDot({ status }: { status: StageStatus | string }) {
   const colors: Record<string, string> = {
-    pending:   "#374151",
-    running:   "#60a5fa",
-    completed: "#34d399",
-    failed:    "#f87171",
+    pending:            "#374151",
+    running:            "#60a5fa",
+    completed:          "#34d399",
+    failed:             "#f87171",
+    awaiting_approval:  "#fbbf24",
   };
   const color = colors[status] ?? "#374151";
   return (
     <div style={{
       width: 7, height: 7, borderRadius: "50%", background: color, flexShrink: 0,
-      boxShadow: status === "running" ? `0 0 6px ${color}` : "none",
-      animation: status === "running" ? "pulse 1.4s infinite" : "none",
+      boxShadow: (status === "running" || status === "awaiting_approval") ? `0 0 6px ${color}` : "none",
+      animation: (status === "running" || status === "awaiting_approval") ? "pulse 1.4s infinite" : "none",
     }} />
   );
 }
@@ -795,7 +797,7 @@ function StageContent({ stageKey, output }: { stageKey: string; output: Record<s
 
 // ─── Left Panel: Timeline ─────────────────────────────────────────────────────
 function TimelinePanel({
-  stages, liveStatuses, selectedStage, onSelectStage, completedCount, projectId,
+  stages, liveStatuses, selectedStage, onSelectStage, completedCount, projectId, runState,
 }: {
   stages: Record<string, StageInfo>;
   liveStatuses: Record<string, StageStatus>;
@@ -803,6 +805,7 @@ function TimelinePanel({
   onSelectStage: (stage: string) => void;
   completedCount: number;
   projectId: string;
+  runState: RunState | null;
 }) {
   const progress = (completedCount / STAGE_ORDER.length) * 100;
   const shortId = projectId.slice(0, 8).toUpperCase();
@@ -822,9 +825,24 @@ function TimelinePanel({
       }}>
         <div style={{ fontSize: 9, color: "#6b7280", letterSpacing: "0.12em", marginBottom: 4 }}>PIPELINE</div>
         <div style={{
-          fontSize: 11, color: "#9ca3af", fontFamily: "monospace",
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>{shortId}</div>
+          display: "flex", alignItems: "center", gap: 8,
+        }}>
+          <span style={{
+            fontSize: 11, color: "#9ca3af", fontFamily: "monospace",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>{shortId}</span>
+          {runState && (
+            <span style={{
+              fontSize: 8, padding: "1px 6px", borderRadius: 3, fontWeight: 700,
+              letterSpacing: "0.06em",
+              background: runState.mode === "step_by_step" ? "rgba(251,191,36,0.12)" : "rgba(52,211,153,0.1)",
+              color: runState.mode === "step_by_step" ? "#fbbf24" : "#34d399",
+              border: `1px solid ${runState.mode === "step_by_step" ? "rgba(251,191,36,0.25)" : "rgba(52,211,153,0.25)"}`,
+            }}>
+              {runState.mode === "step_by_step" ? "STEP" : "AUTO"}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Stage list — CHANGE 3: connector lines between stages */}
@@ -854,6 +872,15 @@ function TimelinePanel({
                   color: isSelected ? "#e2e8f0" : status === "pending" ? "#4b5563" : "#9ca3af",
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 }}>{meta.label}</span>
+                {runState?.mode === "step_by_step"
+                  && runState?.currentStatus === "awaiting_approval"
+                  && runState?.currentStage === key && (
+                  <span style={{
+                    fontSize: 7, padding: "1px 5px", borderRadius: 3, fontWeight: 700,
+                    letterSpacing: "0.06em", flexShrink: 0,
+                    background: "rgba(251,191,36,0.15)", color: "#fbbf24",
+                  }}>AWAIT</span>
+                )}
                 <StatusDot status={status} />
               </button>
               {/* Connector line between stages — không hiện sau stage cuối */}
@@ -894,7 +921,7 @@ function TimelinePanel({
 
 // ─── Right Panel: Stage Detail (split Input | Output) ────────────────────────
 function StageDetailPanel({
-  stageKey, stage, liveStatus, connected, events, projectId, onReload,
+  stageKey, stage, liveStatus, connected, events, projectId, onReload, runState,
 }: {
   stageKey: string;
   stage: StageInfo | undefined;
@@ -903,6 +930,7 @@ function StageDetailPanel({
   events: PipelineEvent[];
   projectId: string;
   onReload: () => void;
+  runState: RunState | null;
 }) {
   const meta   = STAGE_META[stageKey]   || { label: stageKey, icon: "⚙", color: "#6b7280", desc: "" };
   const config = STAGE_CONFIG[stageKey] || { agent: "—", skill: "—", promptFile: "—", tools: [], notes: "" };
@@ -920,8 +948,13 @@ function StageDetailPanel({
   const [editingInput, setEditingInput]   = useState(false);
   const [editInputText, setEditInputText] = useState("");
   const [savedInput, setSavedInput]       = useState<Record<string, unknown> | null>(null); // override saved locally
-  const [actionLoading, setActionLoading] = useState<"retry" | "save" | "edit-retry" | null>(null);
+  const [actionLoading, setActionLoading] = useState<"retry" | "save" | "edit-retry" | "next" | null>(null);
   const [copyDone, setCopyDone]           = useState(false);
+
+  const isStepByStep = runState?.mode === "step_by_step";
+  const isAwaitingApproval = isStepByStep
+    && runState?.currentStatus === "awaiting_approval"
+    && runState?.currentStage === stageKey;
 
   // The "effective" input shown: savedInput override > DB input
   const effectiveInput = savedInput ?? input;
@@ -971,6 +1004,16 @@ function StageDetailPanel({
       setCopyDone(true);
       setTimeout(() => setCopyDone(false), 2000);
     }).catch(() => {});
+  }
+
+  function handleNextStep() {
+    setActionLoading("next");
+    api.pipeline.nextStep(projectId)
+      .catch(() => {})
+      .finally(() => {
+        setActionLoading(null);
+        onReload();
+      });
   }
 
   const btnBase: React.CSSProperties = {
@@ -1045,6 +1088,23 @@ function StageDetailPanel({
             <span>{actionLoading === "retry" ? "Running…" : "Retry"}</span>
           </button>
         )}
+
+        {/* Approve & Run Next — only in step-by-step mode when awaiting approval */}
+        {isStepByStep && isAwaitingApproval && (
+          <button
+            onClick={handleNextStep}
+            disabled={actionLoading !== null}
+            style={{
+              ...btnBase,
+              color: "#0d0f13", background: "#fbbf24",
+              border: "1px solid #fbbf24", fontWeight: 700,
+              padding: "4px 14px",
+            }}
+          >
+            <span>▶</span>
+            <span>{actionLoading === "next" ? "Starting…" : "Approve & Run Next"}</span>
+          </button>
+        )}
       </div>
 
       {/* ── Error banner ── */}
@@ -1071,11 +1131,13 @@ function StageDetailPanel({
               fontSize: 10, padding: "2px 8px", borderRadius: 20,
               background: ev.status === "completed" ? "rgba(52,211,153,0.08)"
                         : ev.status === "started"   ? "rgba(96,165,250,0.08)"
+                        : ev.status === "awaiting_approval" ? "rgba(251,191,36,0.08)"
                                                     : "rgba(248,113,113,0.08)",
               border: `1px solid ${ev.status === "completed" ? "rgba(52,211,153,0.2)"
                                  : ev.status === "started"   ? "rgba(96,165,250,0.2)"
+                                 : ev.status === "awaiting_approval" ? "rgba(251,191,36,0.2)"
                                                              : "rgba(248,113,113,0.2)"}`,
-              color: ev.status === "completed" ? "#34d399" : ev.status === "started" ? "#60a5fa" : "#f87171",
+              color: ev.status === "completed" ? "#34d399" : ev.status === "started" ? "#60a5fa" : ev.status === "awaiting_approval" ? "#fbbf24" : "#f87171",
             }}>{ev.message}</span>
           ))}
         </div>
@@ -1228,6 +1290,14 @@ function StageDetailPanel({
                     <div style={{ fontSize: 13, color: "#4b5563", fontWeight: 600 }}>Processing…</div>
                     <div style={{ fontSize: 11, color: "#374151", marginTop: 4 }}>{meta.label} is running</div>
                   </>
+                ) : isAwaitingApproval ? (
+                  <>
+                    <div style={{ fontSize: 36, marginBottom: 14, color: "#fbbf24", opacity: 0.6 }}>⏸</div>
+                    <div style={{ fontSize: 13, color: "#fbbf24", fontWeight: 600 }}>Awaiting Approval</div>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>
+                      Review output rồi nhấn &quot;Approve &amp; Run Next&quot; để tiếp tục
+                    </div>
+                  </>
                 ) : status === "pending" ? (
                   <>
                     <div style={{ fontSize: 36, marginBottom: 14, opacity: 0.15 }}>{meta.icon}</div>
@@ -1272,6 +1342,7 @@ export default function ProjectPage() {
   const [connected, setConnected] = useState(false);
   const [stages, setStages] = useState<Record<string, StageInfo>>({});
   const [selectedStage, setSelectedStage] = useState<string>("analysis");
+  const [runState, setRunState] = useState<RunState | null>(null);
 
   const loadStages = useCallback(() => {
     // Use PAGE_API_BASE (8082) directly via fetch since api.ts uses 8080
@@ -1298,7 +1369,13 @@ export default function ProjectPage() {
       });
   }, [projectId]);
 
-  useEffect(() => { loadStages(); }, [loadStages]);
+  const loadRunState = useCallback(() => {
+    api.pipeline.getRunState(projectId)
+      .then(setRunState)
+      .catch(() => {}); // may 404 for old projects without step-by-step
+  }, [projectId]);
+
+  useEffect(() => { loadStages(); loadRunState(); }, [loadStages, loadRunState]);
 
   useEffect(() => {
     const source = connectPipelineSSE(
@@ -1306,21 +1383,32 @@ export default function ProjectPage() {
       (event) => {
         setConnected(true);
         setEvents(prev => [...prev, event]);
-        setLiveStatuses(prev => ({
-          ...prev,
-          [event.stage]: event.status === "started" ? "running" :
-                          event.status === "completed" ? "completed" : "failed",
-        }));
+        setLiveStatuses(prev => {
+          // awaiting_approval is a run-level status, not a stage status.
+          // The stage itself is "completed" — don't overwrite it.
+          if (event.status === "awaiting_approval") return prev;
+          return {
+            ...prev,
+            [event.stage]: event.status === "started" ? "running" :
+                            event.status === "completed" ? "completed" : "failed",
+          };
+        });
         if (event.status === "completed") {
           setSelectedStage(event.stage);
           loadStages();
+          loadRunState();
+        }
+        if (event.status === "awaiting_approval") {
+          setSelectedStage(event.stage);
+          loadStages();
+          loadRunState();
         }
         if (event.status === "failed") loadStages();
       },
       () => setConnected(false)
     );
     return () => source.close();
-  }, [projectId, loadStages]);
+  }, [projectId, loadStages, loadRunState]);
 
   const completedCount = STAGE_ORDER.filter(
     s => liveStatuses[s] === "completed" || stages[s]?.status === "completed"
@@ -1328,8 +1416,9 @@ export default function ProjectPage() {
 
   const shortId = projectId.slice(0, 8).toUpperCase();
 
-  const overallStatus: "completed" | "running" | "failed" | "pending" =
+  const overallStatus: "completed" | "running" | "failed" | "pending" | "awaiting_approval" =
     STAGE_ORDER.every(s => liveStatuses[s] === "completed" || stages[s]?.status === "completed") ? "completed" :
+    runState?.currentStatus === "awaiting_approval" ? "awaiting_approval" :
     STAGE_ORDER.some(s => liveStatuses[s] === "running") ? "running" :
     STAGE_ORDER.some(s => liveStatuses[s] === "failed" || stages[s]?.status === "failed") ? "failed" :
     "pending";
@@ -1366,6 +1455,7 @@ export default function ProjectPage() {
           onSelectStage={setSelectedStage}
           completedCount={completedCount}
           projectId={projectId}
+          runState={runState}
         />
 
         {/* ── RIGHT: Detail ── */}
@@ -1448,7 +1538,8 @@ export default function ProjectPage() {
             connected={connected}
             events={events}
             projectId={projectId}
-            onReload={loadStages}
+            onReload={() => { loadStages(); loadRunState(); }}
+            runState={runState}
           />
         </div>
       </div>

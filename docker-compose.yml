@@ -1,5 +1,5 @@
 # WAOO Studio — Development Environment
-# PostgreSQL, NATS, Redis, MinIO
+# PostgreSQL, NATS, Redis, MinIO, Backend Server
 
 services:
   postgres:
@@ -37,11 +37,15 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: waoo-redis
+    restart: always
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
+    command: redis-server --protected-mode no
+  waoo-redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"  # Đổi số bên trái thành 6380
+    command: redis-server --protected-mode no
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -60,6 +64,28 @@ services:
       - "9001:9001"   # Console
     volumes:
       - minio_data:/data
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: waoo-server
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=waoo
+      - DB_PASSWORD=waoo_secret
+      - DB_NAME=waoo_studio
+      - REDIS_URL=redis:6379
+      - NATS_URL=nats://nats:4222
+      - MINIO_ENDPOINT=minio:9000
+    depends_on:
+      - postgres
+      - redis
+      - nats
 
 volumes:
   postgres_data:

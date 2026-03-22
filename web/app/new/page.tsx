@@ -7,6 +7,7 @@ export default function NewProjectPage() {
   const router = useRouter();
   const [form, setForm] = useState({
     projectId: "", story: "", inputType: "novel", budget: "medium", qualityLevel: "standard",
+    mode: "autopilot" as "autopilot" | "step_by_step",
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -62,6 +63,32 @@ export default function NewProjectPage() {
               options={[{ value: "draft", label: "⚡ Draft" }, { value: "standard", label: "✨ Standard" }, { value: "premium", label: "💎 Premium" }]} />
           </FieldGroup>
         </div>
+
+        <FieldGroup label="Execution Mode">
+          <div style={{ display: "flex", gap: 8 }}>
+            {([
+              { value: "autopilot", label: "Autopilot", desc: "Chạy tự động toàn bộ pipeline" },
+              { value: "step_by_step", label: "Step-by-Step", desc: "Duyệt từng bước trước khi tiếp tục" },
+            ] as const).map((opt) => (
+              <button key={opt.value} type="button"
+                onClick={() => setForm({ ...form, mode: opt.value })}
+                style={{
+                  flex: 1, padding: "12px 14px", borderRadius: 10, cursor: "pointer",
+                  textAlign: "left", transition: "all 0.15s",
+                  background: form.mode === opt.value ? "rgba(245,178,64,0.08)" : "rgba(255,255,255,0.02)",
+                  border: `1.5px solid ${form.mode === opt.value ? "rgba(245,178,64,0.4)" : "#1e2028"}`,
+                }}>
+                <div style={{
+                  fontSize: 13, fontWeight: 600, marginBottom: 3,
+                  color: form.mode === opt.value ? "#f5b240" : "#9ca3af",
+                }}>
+                  {opt.value === "autopilot" ? "▶ " : "⏸ "}{opt.label}
+                </div>
+                <div style={{ fontSize: 11, color: "#6b7280" }}>{opt.desc}</div>
+              </button>
+            ))}
+          </div>
+        </FieldGroup>
 
         {error && (
           <div style={{

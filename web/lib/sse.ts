@@ -1,11 +1,11 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8082';
 
 export interface PipelineEvent {
   projectId: string;
   stage: string;
   stageIndex: number;
   totalStages: number;
-  status: 'started' | 'completed' | 'failed';
+  status: 'started' | 'completed' | 'failed' | 'awaiting_approval';
   message: string;
   data?: Record<string, unknown>;
   timestamp: string;
