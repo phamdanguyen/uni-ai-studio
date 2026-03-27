@@ -1,5 +1,12 @@
-# WAOO Studio — Docker Compose (Full Stack)
+version: '3.8'
+
 services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: waoo-nats
+    networks:
+      - waoo-internal
+
   postgres:
     image: postgres:16-alpine
     container_name: waoo-postgres
@@ -7,62 +14,41 @@ services:
       POSTGRES_USER: waoo
       POSTGRES_PASSWORD: waoo_secret
       POSTGRES_DB: waoo_studio
-    ports:
-      - "5434:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
     networks:
       - waoo-internal
 
-  keycloak:
-    image: quay.io/keycloak/keycloak:26.0
-    container_name: waoo-keycloak
-    command: ["start-dev", "--import-realm"]
-    environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      KC_HTTP_RELATIVE_PATH: /
-      KC_HOSTNAME_STRICT: "false"
-    ports:
-      - "8180:8080"
-    volumes:
-      - ./keycloak/waoo-realm.json:/opt/keycloak/data/import/waoo-realm.json:ro
+  redis:
+    image: redis:7-alpine
+    container_name: waoo-redis
     networks:
       - waoo-internal
 
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: waoo-backend
     env_file: .env
     ports:
       - "8082:8080"
     depends_on:
       - postgres
+      - nats
+      - redis
     networks:
       - waoo-internal
 
   web:
     build:
       context: ./web
-      dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_AUTH_ENABLED: "true" # Bật lại để nó không bị lỗi kết nối
-        NEXT_PUBLIC_KEYCLOAK_URL: "http://localhost:8180"
-        NEXT_PUBLIC_KEYCLOAK_REALM: "waoo-studio"
-        NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: "waoo-web"
+        NEXT_PUBLIC_AUTH_ENABLED: "false"
+        NEXT_PUBLIC_API_URL: "http://localhost:8082"
     container_name: waoo-web
     ports:
       - "3003:3000"
     depends_on:
       - backend
-      - keycloak
     networks:
       - waoo-internal
-
-volumes:
-  postgres_data:
 
 networks:
   waoo-internal:

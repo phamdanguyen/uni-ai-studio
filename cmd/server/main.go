@@ -699,10 +699,11 @@ func main() {
 	authMiddleware := auth.New(cfg.Keycloak.URL, cfg.Keycloak.Realm, logger)
 
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      corsMiddleware(authMiddleware.Handler(mux)),
-		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: 0, // Disable for SSE
+                Addr:           addr,
+                Handler:        corsMiddleware(mux), 
+                ReadTimeout:    cfg.Server.ReadTimeout,
+                WriteTimeout:   0,
+
 	}
 
 	// Start server
