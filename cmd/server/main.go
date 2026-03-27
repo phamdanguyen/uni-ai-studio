@@ -703,8 +703,7 @@ func main() {
                 Handler:        corsMiddleware(mux), 
                 ReadTimeout:    cfg.Server.ReadTimeout,
                 WriteTimeout:   0,
-
-	}
+        }
 
 	// Start server
 	go func() {
