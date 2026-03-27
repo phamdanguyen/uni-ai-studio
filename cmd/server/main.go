@@ -25,7 +25,7 @@ import (
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/media"
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/storyboard"
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/voice"
-	"github.com/uni-ai-studio/waoo-studio/internal/auth"
+	// "github.com/uni-ai-studio/waoo-studio/internal/auth"
 	"github.com/uni-ai-studio/waoo-studio/internal/config"
 	"github.com/uni-ai-studio/waoo-studio/internal/llm"
 	"github.com/uni-ai-studio/waoo-studio/internal/memory"
@@ -698,10 +698,11 @@ func main() {
 	// authMiddleware := auth.New(cfg.Keycloak.URL, cfg.Keycloak.Realm, logger)
 
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      corsMiddleware(mux), // <-- SỬA CHỖ NÀY: Chỉ để lại mux thôi
-		ReadTimeout:  cfg.Server.ReadTimeout,
+		Addr:         addr,
+		Handler:      corsMiddleware(mux),
+		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: 0,
+	}
 
 	// Start server
 	go func() {
