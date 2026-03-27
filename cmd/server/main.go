@@ -695,15 +695,13 @@ func main() {
 		})
 	})
 
-	// Auth middleware — Keycloak JWT validation
-	authMiddleware := auth.New(cfg.Keycloak.URL, cfg.Keycloak.Realm, logger)
+	// authMiddleware := auth.New(cfg.Keycloak.URL, cfg.Keycloak.Realm, logger)
 
 	server := &http.Server{
-                Addr:           addr,
-                Handler:        corsMiddleware(mux), 
-                ReadTimeout:    cfg.Server.ReadTimeout,
-                WriteTimeout:   0,
-        }
+		Addr:         addr,
+		Handler:      corsMiddleware(mux), // <-- SỬA CHỖ NÀY: Chỉ để lại mux thôi
+		ReadTimeout:  cfg.Server.ReadTimeout,
+		WriteTimeout: 0,
 
 	// Start server
 	go func() {
@@ -747,7 +745,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "*") // Chấp nhận mọi loại Header
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
