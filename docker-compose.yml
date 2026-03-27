@@ -1,6 +1,4 @@
 # WAOO Studio — Docker Compose (Full Stack)
-# Infrastructure + Backend + Frontend
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -13,49 +11,8 @@ services:
       - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U waoo -d waoo_studio"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
     networks:
       - waoo-internal
-      - brain-network
-
-  nats:
-    image: nats:2.10-alpine
-    container_name: waoo-nats
-    command: ["-js", "-m", "8222"]
-    ports:
-      - "4222:4222"   # Client
-      - "8222:8222"   # Monitoring
-    volumes:
-      - nats_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 4222 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    networks:
-      - waoo-internal
-      - brain-network
-
-  redis:
-    image: redis:7-alpine
-    container_name: waoo-redis
-    ports:
-      - "6381:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    networks:
-      - waoo-internal
-      - brain-network
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
@@ -64,41 +21,14 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-      KC_HEALTH_ENABLED: "true"
       KC_HTTP_RELATIVE_PATH: /
-      KC_HOSTNAME: auth.uniai.com.vn
       KC_HOSTNAME_STRICT: "false"
-      KC_HOSTNAME_STRICT_HTTPS: "false"
-      KC_PROXY: edge
     ports:
       - "8180:8080"
     volumes:
       - ./keycloak/waoo-realm.json:/opt/keycloak/data/import/waoo-realm.json:ro
-    healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && cat <&3 | grep -q 'UP'"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
     networks:
       - waoo-internal
-      - brain-network
-
-  minio:
-    image: minio/minio:latest
-    container_name: waoo-minio
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: ["server", "/data", "--console-address", ":9001"]
-    ports:
-      - "9002:9000"   # API
-      - "9003:9001"   # Console
-    volumes:
-      - minio_data:/data
-    networks:
-      - waoo-internal
-      - brain-network
 
   backend:
     build:
@@ -109,49 +39,31 @@ services:
     ports:
       - "8082:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+      - postgres
     networks:
       - waoo-internal
-      - brain-network
 
   web:
     build:
       context: ./web
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: "https://studio.uniai.com.vn/api"
-        NEXT_PUBLIC_KEYCLOAK_URL: "https://auth.uniai.com.vn"
+        NEXT_PUBLIC_AUTH_ENABLED: "true" # Bật lại để nó không bị lỗi kết nối
+        NEXT_PUBLIC_KEYCLOAK_URL: "http://localhost:8180"
         NEXT_PUBLIC_KEYCLOAK_REALM: "waoo-studio"
         NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: "waoo-web"
     container_name: waoo-web
     ports:
       - "3003:3000"
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
+      - keycloak
     networks:
       - waoo-internal
-      - brain-network
 
 volumes:
   postgres_data:
-  nats_data:
-  redis_data:
-  minio_data:
 
 networks:
   waoo-internal:
     driver: bridge
-  brain-network:
-    external: true
-    name: uni-ai-brain_brain-network
