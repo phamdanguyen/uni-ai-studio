@@ -17,8 +17,8 @@ build: ## Build the server binary
 	# go build -o bin/waoo-worker ./cmd/worker
 	# go build -o bin/waoo-cli ./cmd/cli
 
-test: ## Run all tests
-	go test -race -cover ./...
+test: ## Run all tests (uses -race when CGO is available)
+	go test $(shell go env CGO_ENABLED | grep -q 1 && echo "-race") -cover ./...
 
 lint: ## Run linter
 	golangci-lint run ./...
