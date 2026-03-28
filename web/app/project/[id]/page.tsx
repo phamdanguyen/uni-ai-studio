@@ -5,6 +5,7 @@ import Link from "next/link";
 import { connectPipelineSSE, type PipelineEvent } from "@/lib/sse";
 import { getToken } from "@/lib/keycloak";
 import { api, type StageInfo, type RunState } from "@/lib/api";
+import { fmt, dur, safeParseJson } from "@/lib/utils";
 
 // Override API base for this page (server runs at 8082)
 const PAGE_API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8082";
@@ -53,24 +54,6 @@ const STAGE_CONFIG: Record<string, StageConfig> = {
 };
 
 type StageStatus = "pending" | "running" | "completed" | "failed" | "awaiting_approval";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function fmt(iso?: string) {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function dur(start?: string, end?: string) {
-  if (!start) return null;
-  const ms = new Date(end || new Date()).getTime() - new Date(start).getTime();
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
-function safeParseJson(str: string): unknown {
-  try { return JSON.parse(str); } catch { return null; }
-}
 
 // ─── JSON Tree Viewer ─────────────────────────────────────────────────────────
 function JsonNode({ data, depth = 0 }: { data: unknown; depth?: number }) {

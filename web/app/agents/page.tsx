@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, type AgentCard, type AgentModelsConfig, type AgentModelConfig } from "@/lib/api";
+import { agentIcon } from "@/lib/utils";
 
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentCard[]>([]);
@@ -164,12 +165,4 @@ export default function AgentsPage() {
       </div>
     </div>
   );
-}
-
-function agentIcon(name: string): string {
-  const icons: Record<string, string> = {
-    director: "🎬", character: "👤", location: "🏔",
-    storyboard: "🎞", media: "🖼", voice: "🎤",
-  };
-  return icons[name] || "🤖";
 }

@@ -10,14 +10,16 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	Server   ServerConfig
-	NATS     NATSConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	Storage  StorageConfig
-	LLM      LLMConfig
-	Media    MediaConfig
-	Keycloak KeycloakConfig
+	Server        ServerConfig
+	NATS          NATSConfig
+	Database      DatabaseConfig
+	Redis         RedisConfig
+	Storage       StorageConfig
+	LLM           LLMConfig
+	Media         MediaConfig
+	Keycloak      KeycloakConfig
+	WebhookSecret string
+	AuthEnabled   bool
 }
 
 // KeycloakConfig holds Keycloak OIDC settings.
@@ -167,6 +169,8 @@ func Load() Config {
 			URL:   envStr("KEYCLOAK_URL", "http://localhost:8180"),
 			Realm: envStr("KEYCLOAK_REALM", "waoo-studio"),
 		},
+		WebhookSecret: envStr("WEBHOOK_SECRET", ""),
+		AuthEnabled:   envBool("AUTH_ENABLED", false),
 	}
 }
 

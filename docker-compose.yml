@@ -14,6 +14,8 @@ services:
       POSTGRES_USER: waoo
       POSTGRES_PASSWORD: waoo_secret
       POSTGRES_DB: waoo_studio
+    volumes:
+      - waoo-pgdata:/var/lib/postgresql/data
     networks:
       - waoo-internal
 
@@ -53,3 +55,6 @@ services:
 networks:
   waoo-internal:
     driver: bridge
+
+volumes:
+  waoo-pgdata:

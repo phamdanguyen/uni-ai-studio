@@ -13,8 +13,9 @@ dev: ## Run the server in development mode
 
 build: ## Build the server binary
 	go build -o bin/waoo-server ./cmd/server
-	go build -o bin/waoo-worker ./cmd/worker
-	go build -o bin/waoo-cli ./cmd/cli
+	# TODO: uncomment khi cmd/worker và cmd/cli được implement
+	# go build -o bin/waoo-worker ./cmd/worker
+	# go build -o bin/waoo-cli ./cmd/cli
 
 test: ## Run all tests
 	go test -race -cover ./...

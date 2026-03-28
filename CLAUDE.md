@@ -23,7 +23,7 @@ Khi nội dung trong file này lệch với code, ưu tiên đọc trực tiếp
 
 ```bash
 make dev          # go run ./cmd/server
-make build        # Build: bin/waoo-server (cmd/worker và cmd/cli chưa tồn tại)
+make build        # Build: bin/waoo-server
 make test         # go test -race -cover ./...
 make lint         # golangci-lint run ./...
 make deps         # go mod tidy
@@ -115,7 +115,7 @@ Stages (11):
 - Tiered: hot (in-process, maxSize=10000, LRU eviction, TTL) + warm (Redis, prefix `waoo:mem:`, TTL 30m) + cold (PostgreSQL, table `agent_memory`, tag queries)
 - Read-through caching: Get hot → warm → cold, promote on hit
 - Scoped views: `ProjectMemory(projectID)`, `AgentMemory(agentName, projectID)`
-- **Chưa wired**: `memStore` được tạo nhưng chưa truyền cho agents (`_ = memStore` trong main.go)
+- `memStore` được inject vào tất cả agents qua `NewBaseAgent()`; truy cập qua `a.Memory()`
 
 ### Quality Gate (`internal/qualitygate/`)
 
@@ -131,7 +131,7 @@ Stages (11):
 ### Workflow Engine (`internal/workflow/`)
 
 - Lightweight durable workflow (Temporal-inspired): DAG execution, checkpointing, resume, retry with backoff
-- Hiện chưa được gọi từ main.go
+- Engine initialized trong main.go khi DB available; sẵn sàng cho integration
 
 ### Prompt Templates (`lib/prompts/`)
 
@@ -153,7 +153,7 @@ Stages (11):
 - Async task polling + persistence: `internal/poller/`
 - NATS bus implementation: `internal/natsbus/bus.go`
 - Provider webhook normalization: `internal/webhook/`
-- Auth middleware (Keycloak JWT): `internal/auth/middleware.go` — **chưa bật** trong chain
+- Auth middleware (Keycloak JWT): `internal/auth/middleware.go` — toggle via `AUTH_ENABLED` env (default `false`)
 
 ### Frontend (Next.js)
 
@@ -163,7 +163,7 @@ Stages (11):
 - Fonts: Plus Jakarta Sans + JetBrains Mono (Google Fonts CDN, không dùng `next/font`)
 - Design: dark-only theme, accent color gold `#f5b240`, cinematic noise grain overlay
 - Không có `components/` directory — tất cả components inline trong page files
-- `web/lib/`: chỉ 3 files (`api.ts`, `keycloak.ts`, `sse.ts`)
+- `web/lib/`: 4 files (`api.ts`, `keycloak.ts`, `sse.ts`, `utils.ts`)
 - SSE: JWT token truyền qua query parameter (EventSource không hỗ trợ custom headers)
 - Keycloak: `login-required`, PKCE S256, token refresh mỗi 60s
 
@@ -185,7 +185,7 @@ Xem đầy đủ trong `cmd/server/main.go`. Các nhóm chính:
 
 ## Infrastructure (docker-compose)
 
-Services: `nats` (2.10-alpine), `postgres` (16-alpine, **không có volume — data mất khi down**), `redis` (7-alpine), `backend`, `web`
+Services: `nats` (2.10-alpine), `postgres` (16-alpine, persistent volume `waoo-pgdata`), `redis` (7-alpine), `backend`, `web`
 
 Published host ports: backend `8082:8080`, web `3003:3000`. Internal services không publish host port.
 
@@ -207,21 +207,19 @@ Key env groups:
 - NATS: `NATS_URL` (nats://localhost:4222), `NATS_CLUSTER_ID`, `NATS_MAX_RECONNECTS`, `NATS_RECONNECT_WAIT`, `NATS_REQUEST_TIMEOUT`
 - S3/MinIO: `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION`, `S3_USE_SSL`
 - Auth: `KEYCLOAK_URL`, `KEYCLOAK_REALM`
+- Webhooks: `WEBHOOK_SECRET`
+- Feature flags: `AUTH_ENABLED` (default `false`)
 - Frontend: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_KEYCLOAK_URL`, `NEXT_PUBLIC_KEYCLOAK_REALM`, `NEXT_PUBLIC_KEYCLOAK_CLIENT_ID`
 
 Lưu ý: `.env.example` dùng port khác với code defaults cho DB (5434 vs 5432) và Redis (6381 vs 6379) — do .env.example dùng Docker port mapping.
 
-## Known Issues / TODOs
+## Remaining TODOs
 
-- `cmd/worker` và `cmd/cli` chưa tồn tại nhưng Makefile cố build chúng
-- `memStore` tạo nhưng chưa inject vào agents (`_ = memStore`)
-- `QwenKey` không được truyền vào `tools.NewRegistry()` từ main.go
-- `WEBHOOK_SECRET` đọc qua `os.Getenv()` trực tiếp, không có trong config.go hay .env.example
-- `workflow` engine chưa được gọi từ main.go
-- Auth middleware chưa bật trong handler chain
-- Docker compose postgres không có persistent volume
-- Frontend `agentIcon()` duplicate giữa `app/page.tsx` và `app/agents/page.tsx`
-- `project/[id]/page.tsx` rất lớn (~1550 dòng) — chứa nhiều components nên tách
+- `cmd/worker` và `cmd/cli` chưa implement (commented out trong Makefile)
+- `project/[id]/page.tsx` rất lớn (~1550 dòng) — nên tách components
+- MinIO service chưa có trong docker-compose (config và .env.example đã có S3 settings)
+- Workflow engine đã init nhưng chưa wire vào HTTP routes
+- Repo chưa có `*_test.go` files
 
 ## Code Conventions
 

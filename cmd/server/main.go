@@ -25,7 +25,7 @@ import (
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/media"
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/storyboard"
 	"github.com/uni-ai-studio/waoo-studio/internal/agents/voice"
-	// "github.com/uni-ai-studio/waoo-studio/internal/auth"
+	"github.com/uni-ai-studio/waoo-studio/internal/auth"
 	"github.com/uni-ai-studio/waoo-studio/internal/config"
 	"github.com/uni-ai-studio/waoo-studio/internal/llm"
 	"github.com/uni-ai-studio/waoo-studio/internal/memory"
@@ -34,6 +34,7 @@ import (
 	"github.com/uni-ai-studio/waoo-studio/internal/poller"
 	"github.com/uni-ai-studio/waoo-studio/internal/tools"
 	"github.com/uni-ai-studio/waoo-studio/internal/webhook"
+	"github.com/uni-ai-studio/waoo-studio/internal/workflow"
 )
 
 const version = "0.3.0"
@@ -87,6 +88,7 @@ func main() {
 		MiniMaxKey: cfg.Media.MiniMaxKey,
 		ViduKey:    cfg.Media.ViduKey,
 		GoogleKey:  cfg.LLM.GoogleAIKey,
+		QwenKey:    cfg.Media.QwenKey,
 	}, logger)
 
 	// Tiered Memory (hot + warm Redis + cold PostgreSQL)
@@ -110,7 +112,6 @@ func main() {
 	} else {
 		memStore = memory.NewStore(warmBackend, nil, logger)
 	}
-	_ = memStore // available for agents in future iterations
 
 	// Async Task Poller with persistence
 	var taskPersist *poller.PersistentStore
@@ -145,7 +146,7 @@ func main() {
 	taskPoller.Start(ctx)
 
 	// Webhook handler for external callbacks
-	webhookHandler := webhook.NewHandler(os.Getenv("WEBHOOK_SECRET"), logger)
+	webhookHandler := webhook.NewHandler(cfg.WebhookSecret, logger)
 	webhookHandler.OnComplete(func(event webhook.CompletionEvent) {
 		logger.Info("webhook received",
 			"provider", event.Provider,
@@ -180,6 +181,12 @@ func main() {
 	// SSE handler tạo channel riêng cho từng kết nối; pipeline listeners ghi vào channel đó.
 	// Dùng closure-based listener được register khi SSE client kết nối (xem bên dưới).
 
+	// Workflow Engine — durable workflow execution (Temporal-inspired)
+	if dbPool != nil {
+		_ = workflow.NewEngine(dbPool, logger) // ready for integration with pipeline stages
+		logger.Info("workflow engine initialized")
+	}
+
 	// Agent Supervisor — monitors health, tracks error rates
 	supervisor := agent.NewSupervisor(logger)
 
@@ -187,12 +194,12 @@ func main() {
 	registry := agent.NewRegistry(bus, supervisor, logger)
 
 	allAgents := []agent.Agent{
-		director.New(bus, router, toolRegistry, logger),
-		character.New(bus, router, toolRegistry, logger),
-		location.New(bus, router, toolRegistry, logger),
-		storyboard.New(bus, router, toolRegistry, logger),
-		media.New(bus, router, toolRegistry, logger),
-		voice.New(bus, router, toolRegistry, logger),
+		director.New(bus, router, toolRegistry, memStore, logger),
+		character.New(bus, router, toolRegistry, memStore, logger),
+		location.New(bus, router, toolRegistry, memStore, logger),
+		storyboard.New(bus, router, toolRegistry, memStore, logger),
+		media.New(bus, router, toolRegistry, memStore, logger),
+		voice.New(bus, router, toolRegistry, memStore, logger),
 	}
 
 	for _, a := range allAgents {
@@ -695,11 +702,17 @@ func main() {
 		})
 	})
 
-	// authMiddleware := auth.New(cfg.Keycloak.URL, cfg.Keycloak.Realm, logger)
+	// Auth middleware — enabled via AUTH_ENABLED env var
+	var handler http.Handler = corsMiddleware(mux)
+	if cfg.AuthEnabled {
+		authMiddleware := auth.New(cfg.Keycloak.URL, cfg.Keycloak.Realm, logger)
+		handler = corsMiddleware(authMiddleware.Handler(mux))
+		logger.Info("auth middleware enabled", "keycloakURL", cfg.Keycloak.URL, "realm", cfg.Keycloak.Realm)
+	}
 
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      corsMiddleware(mux),
+		Handler:      handler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: 0,
 	}

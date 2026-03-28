@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/uni-ai-studio/waoo-studio/internal/agent"
+	"github.com/uni-ai-studio/waoo-studio/internal/memory"
 	"github.com/uni-ai-studio/waoo-studio/lib/prompts"
 )
 
@@ -18,7 +19,7 @@ type Agent struct {
 }
 
 // New creates a new Voice Agent.
-func New(bus agent.MessageBus, router agent.ModelRouter, tools agent.ToolRegistry, logger *slog.Logger) *Agent {
+func New(bus agent.MessageBus, router agent.ModelRouter, tools agent.ToolRegistry, mem *memory.Store, logger *slog.Logger) *Agent {
 	card := agent.AgentCard{
 		Name:        "voice",
 		Version:     "2.0.0",
@@ -31,7 +32,7 @@ func New(bus agent.MessageBus, router agent.ModelRouter, tools agent.ToolRegistr
 		},
 		Capabilities: agent.Capabilities{Streaming: true, StateTransitionHistory: true},
 	}
-	return &Agent{BaseAgent: agent.NewBaseAgent(card, bus, router, tools, logger)}
+	return &Agent{BaseAgent: agent.NewBaseAgent(card, bus, router, tools, mem, logger)}
 }
 
 func (a *Agent) HandleMessage(ctx context.Context, msg agent.Message) (*agent.TaskResult, error) {

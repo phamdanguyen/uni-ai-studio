@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, type HealthStatus, type AgentHealth } from "@/lib/api";
+import { agentIcon } from "@/lib/utils";
 import Link from "next/link";
 
 export default function Dashboard() {
@@ -135,12 +136,4 @@ function ActionCard({ href, icon, title, desc }: { href: string; icon: string; t
       <div style={{ fontSize: 12, color: "#5c6079" }}>{desc}</div>
     </Link>
   );
-}
-
-function agentIcon(name: string): string {
-  const icons: Record<string, string> = {
-    director: "🎬", character: "👤", location: "🏔",
-    storyboard: "🎞", media: "🖼", voice: "🎤",
-  };
-  return icons[name] || "🤖";
 }

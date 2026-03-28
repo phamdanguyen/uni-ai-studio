@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uni-ai-studio/waoo-studio/internal/memory"
 )
 
 // BaseAgent provides shared functionality for all specialized agents.
@@ -16,17 +17,19 @@ type BaseAgent struct {
 	bus    MessageBus
 	router ModelRouter
 	tools  ToolRegistry
+	memory *memory.Store
 	logger *slog.Logger
 	name   string // agent name for model routing
 }
 
 // NewBaseAgent creates a new BaseAgent with the given dependencies.
-func NewBaseAgent(card AgentCard, bus MessageBus, router ModelRouter, tools ToolRegistry, logger *slog.Logger) BaseAgent {
+func NewBaseAgent(card AgentCard, bus MessageBus, router ModelRouter, tools ToolRegistry, mem *memory.Store, logger *slog.Logger) BaseAgent {
 	return BaseAgent{
 		card:   card,
 		bus:    bus,
 		router: router,
 		tools:  tools,
+		memory: mem,
 		logger: logger.With("agent", card.Name),
 		name:   card.Name,
 	}
@@ -45,6 +48,11 @@ func (b *BaseAgent) Name() string {
 // Logger returns the agent's logger.
 func (b *BaseAgent) Logger() *slog.Logger {
 	return b.logger
+}
+
+// Memory returns the tiered memory store (may be nil).
+func (b *BaseAgent) Memory() *memory.Store {
+	return b.memory
 }
 
 // CallLLM makes an LLM call using the configured model router.
