@@ -110,7 +110,7 @@ func (s *Store) ApplyEvent(ctx context.Context, event WorldEvent) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is harmless
 
 	// 1. Lock and read current version
 	var currentVersion int
@@ -215,7 +215,9 @@ func (s *Store) GetEvents(ctx context.Context, projectID string, afterVersion in
 		}
 
 		var p map[string]any
-		json.Unmarshal(payload, &p)
+		if err := json.Unmarshal(payload, &p); err != nil {
+			p = map[string]any{"raw": string(payload)}
+		}
 
 		events = append(events, map[string]any{
 			"id":        id,

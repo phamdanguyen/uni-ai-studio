@@ -84,7 +84,6 @@ func (r *RetryLoop) RunPanel(
 
 	// Retry loop
 	currentPrompt := originalPrompt
-	currentURL := resultURL
 
 	for attempt := 1; attempt <= r.config.MaxRetries; attempt++ {
 		r.logger.Info("retrying panel",
@@ -120,8 +119,6 @@ func (r *RetryLoop) RunPanel(
 		result.ResultURL = newURL
 		result.RefinedPrompt = refinedPrompt
 		currentPrompt = refinedPrompt
-		currentURL = newURL
-		_ = currentURL // suppress unused
 
 		if score.Pass {
 			result.Passed = true

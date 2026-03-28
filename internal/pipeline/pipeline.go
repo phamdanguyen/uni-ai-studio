@@ -706,15 +706,6 @@ type StageResult struct {
 	Data    map[string]any `json:"data,omitempty"`
 }
 
-// hasPanels checks if storyboard output contains a parsed panels array.
-func hasPanels(storyboard map[string]any) bool {
-	if storyboard == nil {
-		return false
-	}
-	panels, ok := storyboard["panels"].([]any)
-	return ok && len(panels) > 0
-}
-
 // generateFallbackPanels creates simple scene panels from story text
 // when the storyboard LLM fails to produce structured JSON.
 func (p *Pipeline) generateFallbackPanels(story string) map[string]any {

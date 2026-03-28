@@ -290,7 +290,7 @@ func parseRSAPublicKey(nStr, eStr string) (*rsa.PublicKey, error) {
 func (m *Middleware) writeUnauthorized(w http.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error":   "unauthorized",
 		"message": message,
 	})
