@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { connectPipelineSSE, type PipelineEvent } from "@/lib/sse";
 import { getToken } from "@/lib/keycloak";
 import { api, type StageInfo, type RunState } from "@/lib/api";
@@ -711,8 +712,8 @@ function MediaGenRenderer({ output }: { output: Record<string, unknown> }) {
               border: "1px solid rgba(244,114,182,0.2)", position: "relative",
               aspectRatio: "16/9", background: "#0d0f13",
             }}>
-              <img src={url} alt={`Gen ${i + 1}`}
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              <Image src={url} alt={`Gen ${i + 1}`} fill unoptimized
+                style={{ objectFit: "cover" }}
                 onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
               <div style={{
                 position: "absolute", bottom: 0, left: 0, right: 0,
@@ -739,8 +740,8 @@ function MediaGenRenderer({ output }: { output: Record<string, unknown> }) {
           display: "flex", alignItems: "center", justifyContent: "center",
           zIndex: 2000, cursor: "zoom-out",
         }}>
-          <img src={lightbox} alt="Preview"
-            style={{ maxWidth: "88vw", maxHeight: "88vh", objectFit: "contain", borderRadius: 10 }} />
+          <Image src={lightbox} alt="Preview" fill unoptimized
+            style={{ maxWidth: "88vw", maxHeight: "88vh", objectFit: "contain", borderRadius: 10, position: "relative" }} />
           <button onClick={() => setLightbox(null)} style={{
             position: "absolute", top: 20, right: 24,
             background: "none", border: "none", color: "#fff", fontSize: 28, cursor: "pointer",
